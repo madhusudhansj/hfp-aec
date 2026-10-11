@@ -38,7 +38,7 @@ public final class MainActivity extends Activity {
         setContentView(scroll);
 
         TextView heading = new TextView(this);
-        heading.setText("S9 HFP Audio Engine — v0.1");
+        heading.setText("S9 HFP Audio Engine — v0.2");
         heading.setTextSize(22);
         heading.setTypeface(null, Typeface.BOLD);
         col.addView(heading);
@@ -66,6 +66,9 @@ public final class MainActivity extends Activity {
         for (int i=0; i<presets.length; ++i) if (presets[i] == selected) presetSpinner.setSelection(i);
         col.addView(presetSpinner);
 
+        button(col, "Open v0.2 WebRTC AEC3 sound-engine test", () -> {
+            startActivity(new Intent(this, EngineActivity.class));
+        });
         button(col, "Arm native audio (foreground)", this::armAudio);
         button(col, "Apply selected mic preset / route", () -> {
             int preset = presets[presetSpinner.getSelectedItemPosition()];
