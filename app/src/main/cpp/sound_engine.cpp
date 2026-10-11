@@ -142,6 +142,9 @@ public:
     std::atomic<bool> running{false},playing{false},tone{false};
     std::atomic<int> mode{1},noise{1},agc{0},delay{-1},configVersion{1},lastApmError{0};
     std::atomic<int> measuredDelay{-1},appliedDelay{80},aecDelay{-1};
+    std::atomic<int> timestampIn{AAUDIO_ERROR_INVALID_STATE},timestampOut{AAUDIO_ERROR_INVALID_STATE};
+    std::atomic<int> timingReason{1}; // 0 valid, 1 warmup, 2 input error, 3 output error, 4 range, 5 dropped samples
+    std::atomic<float> rawTimingMs{NAN};
     std::atomic<int> aecMedian{-1},aecDeviation{-1};
     std::atomic<float> erl{NAN},erle{NAN},residualEcho{NAN},divergence{NAN};
     std::atomic<int64_t> aecUpdatedMs{0};
@@ -278,12 +281,17 @@ public:
     // The two calls are adjacent, so use the hardware times of their first samples.
     int timestampDelay(uint64_t micFrame, uint64_t renderFrame) {
         int64_t ip=0,it=0,op=0,ot=0;
-        if(AAudioStream_getTimestamp(input,CLOCK_MONOTONIC,&ip,&it)!=AAUDIO_OK ||
-           AAudioStream_getTimestamp(output,CLOCK_MONOTONIC,&op,&ot)!=AAUDIO_OK)return -1;
+        auto inResult=AAudioStream_getTimestamp(input,CLOCK_MONOTONIC,&ip,&it);
+        auto outResult=AAudioStream_getTimestamp(output,CLOCK_MONOTONIC,&op,&ot);
+        timestampIn=inResult; timestampOut=outResult;
+        if(inResult!=AAUDIO_OK){timingReason=2;rawTimingMs=NAN;return -1;}
+        if(outResult!=AAUDIO_OK){timingReason=3;rawTimingMs=NAN;return -1;}
         double captureTime=double(it)+(double(micFrame)-ip)*1e9/RATE;
         double renderTime=double(ot)+(double(renderFrame)-op)*1e9/RATE;
         double ms=(renderTime-captureTime)/1e6;
-        if(!std::isfinite(ms)||ms < -10 || ms > 500)return -1;
+        rawTimingMs=float(ms);
+        if(!std::isfinite(ms)||ms < -10 || ms > 500){timingReason=4;return -1;}
+        timingReason=0;
         return std::clamp(int(std::lround(ms)),0,500);
     }
     void process(){
@@ -292,22 +300,25 @@ public:
         Speex speex;
         int lastVersion=-1;
         uint64_t micFrame=0,renderFrame=0,blocks=0;
-        bool referenceContinuous=true;
         int16_t raw[BLOCK]{},far[BLOCK]{},farForApm[BLOCK]{},clean[BLOCK]{};
         while(running.load(std::memory_order_acquire)){
             if(recordState.load(std::memory_order_acquire)==2)recordState.store(3,std::memory_order_release);
-            if(!mic.pop(raw,BLOCK)){
+            // Do not inject fake silence when independently scheduled callbacks arrive apart.
+            // There is one consumer per ring, so once both depths suffice these pops succeed.
+            if(mic.depth()<BLOCK || reference.depth()<BLOCK){
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
+            if(!mic.pop(raw,BLOCK))continue;
             bool haveReference=reference.pop(far,BLOCK);
             if(!haveReference){
                 std::memset(far,0,sizeof(far));
-                referenceMissing.fetch_add(1); referenceContinuous=false;
+                referenceMissing.fetch_add(1);
             }
             if(blocks%10==0){
-                measuredDelay = referenceContinuous && mic.drops==0 && reference.drops==0
-                        ? timestampDelay(micFrame,renderFrame) : -1;
+                if(mic.drops==0 && reference.drops==0)
+                    measuredDelay=timestampDelay(micFrame,renderFrame);
+                else { measuredDelay=-1; timingReason=5; }
             }
             micFrame+=BLOCK;
             if(haveReference)renderFrame+=BLOCK;
@@ -330,7 +341,13 @@ public:
                 cfg.gain_controller2.adaptive_digital.max_gain_db=30.0f;
                 cfg.gain_controller2.adaptive_digital.initial_gain_db=6.0f;
                 cfg.gain_controller2.adaptive_digital.headroom_db=6.0f;
-                apm=webrtc::BuiltinAudioProcessingBuilder(cfg).Build(webrtc::CreateEnvironment());
+                // AEC3 estimates acoustic alignment internally. Do not force external-delay mode
+                // or feed its internal delay back into the distinct hardware stream-delay hint.
+                webrtc::EchoCanceller3Config echoConfig;
+                echoConfig.delay.use_external_delay_estimator=false;
+                webrtc::BuiltinAudioProcessingBuilder builder(cfg);
+                builder.SetEchoCancellerConfig(echoConfig,std::nullopt);
+                apm=builder.Build(webrtc::CreateEnvironment());
                 if(!apm)LOGE("APM builder failed");
                 if(mode.load()==2) {
                     bool loaded=speex.open(speexPath);
@@ -431,6 +448,16 @@ public:
     static std::string milliseconds(int value) {
         return value<0?"not available":std::to_string(value)+" ms";
     }
+    std::string timingStatus() const {
+        switch(timingReason.load()){
+            case 0:return "hardware timestamps available";
+            case 2:return std::string("input timestamp: ")+AAudio_convertResultToText(timestampIn.load());
+            case 3:return std::string("output timestamp: ")+AAudio_convertResultToText(timestampOut.load());
+            case 4:return "timestamp difference out of range: "+metric(rawTimingMs.load()," ms");
+            case 5:return "sample drops; restart to restore frame positions";
+            default:return "waiting for paired microphone / reference audio";
+        }
+    }
     std::string monitor() const {
         if(mode.load()!=1)return "AEC3 inactive — select WebRTC APM to view echo metrics.";
         std::ostringstream o;
@@ -438,19 +465,24 @@ public:
         int64_t now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
         o<<"AEC3 LIVE MONITOR"
          <<"\nMetrics: "<<(updated?"last sampled "+std::to_string(std::max(int64_t(0),now-updated))+" ms ago":"waiting for processed audio")
-         <<"\nStream delay sent to APM: "<<appliedDelay.load()<<" ms"
+         <<"\nExternal stream-delay hint sent to APM: "<<appliedDelay.load()<<" ms"
          <<(delay>=0?" (manual)":(measuredDelay>=0?" (hardware estimate)":" (unmeasured fallback)"))
          <<"\nHardware stream estimate: "<<milliseconds(measuredDelay.load())
+         <<"\nHardware timing status: "<<timingStatus()
+         <<"\nInput / output timestamp status: "<<AAudio_convertResultToText(timestampIn.load())<<" / "<<AAudio_convertResultToText(timestampOut.load())
+         <<"\nAEC3 alignment: internal automatic delay tracking"
          <<"\nAEC3 internal delay estimate: "<<milliseconds(aecDelay.load())
          <<"\nDelay median / standard deviation: "<<milliseconds(aecMedian.load())<<" / "<<milliseconds(aecDeviation.load())
          <<"\nEcho reduction (ERLE): "<<metric(erle.load()," dB")
          <<"\nEcho return loss (ERL): "<<metric(erl.load()," dB")
-         <<"\nResidual echo likelihood: "<<metric(residualEcho.load()*100,"%")
-         <<"\nDivergent filter fraction: "<<metric(divergence.load()*100,"%")
+         <<"\nResidual echo likelihood: "<<(std::isfinite(residualEcho.load())?metric(residualEcho.load()*100,"%"):
+                 "not enabled — separate echo detector not attached")
+         <<"\nDivergent filter fraction: "<<(std::isfinite(divergence.load())?metric(divergence.load()*100,"%"):
+                 "not reported by this AEC3 stats path")
          <<"\nTotal DSP level change: "<<metric(cleanDb.load()-rawDb.load()," dB (includes NS / AGC)")
          <<"\nReference gaps: "<<referenceMissing.load()<<"; dropped samples mic / render: "<<mic.drops.load()<<" / "<<reference.drops.load()
          <<"\nAPM error: "<<lastApmError.load()<<"; audio stream error: "<<error.load()
-         <<"\nPlay far-end speech for echo estimates. Unavailable values are not zero correction.";
+         <<"\nThe external hint is not a fixed AEC3 alignment. Play far-end speech for internal echo estimates.";
         return o.str();
     }
     std::string stats() const {

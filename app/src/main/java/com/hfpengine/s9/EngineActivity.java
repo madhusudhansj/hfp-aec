@@ -50,7 +50,7 @@ public final class EngineActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(24,24,24,24);sv.addView(col);setContentView(sv);
         TextView head=new TextView(this);
-        head.setText("S9 HFP — Real-time Sound Engine v0.2.2");
+        head.setText("S9 HFP — Real-time Sound Engine v0.2.3");
         head.setTextSize(22);col.addView(head);
         TextView explain=new TextView(this);
         explain.setText("No Bluetooth bridge in this build. Uses your real mic and speaker plus WebRTC AEC3. Load a speech WAV, arm the test, then listen to exported raw and processed WAVs.");
@@ -78,7 +78,7 @@ public final class EngineActivity extends Activity {
         delay.setEnabled(false);
         autoDelay.setOnCheckedChangeListener((v,checked)->delay.setEnabled(!checked));
         TextView dLabel=new TextView(this);
-        dLabel.setText("Manual delay in ms (0–500). Auto uses hardware timing when available, otherwise an explicit 80 ms fallback. This is not total call latency or a guaranteed acoustic delay.");
+        dLabel.setText("External stream-delay hint (0–500 ms). Auto tries hardware timestamps, with an 80 ms fallback. AEC3 independently tracks echo alignment; this value does not lock it to 80 ms. Timestamp errors appear in the monitor.");
         col.addView(dLabel);
         button(col,"Import speech WAV (PCM16 mono/stereo)",this::pickWav);
         button(col,"Arm / restart real-time engine",this::arm);

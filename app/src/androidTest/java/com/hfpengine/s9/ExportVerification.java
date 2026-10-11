@@ -17,9 +17,11 @@ import java.util.List;
 /** Runs against the phone's actual MediaStore without opening its microphone. */
 public final class ExportVerification extends Instrumentation {
     private boolean migrate;
+    private boolean live;
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         migrate=arguments!=null&&"true".equals(arguments.getString("migrate"));
+        live=arguments!=null&&"true".equals(arguments.getString("live"));
         start();
     }
     private static void check(boolean value, String message) {
@@ -73,6 +75,26 @@ public final class ExportVerification extends Instrumentation {
             check(EngineNative.stats().contains("Sound engine stopped"),"Unexpected native engine state");
             check(EngineNative.aecMonitor().contains("inactive"),"Inactive AEC3 monitor unavailable");
             String migration="";
+            if(live){
+                startActivitySync(new android.content.Intent(context,EngineActivity.class)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+                context.startForegroundService(new android.content.Intent(context,EngineService.class)
+                        .setAction(EngineService.START).putExtra("delay",-1));
+                try {
+                    for(int i=0;i<50 && !EngineService.running;i++)Thread.sleep(100);
+                    check(EngineService.running,"Live diagnostic engine failed: "+EngineService.info);
+                    Thread.sleep(2200);
+                    String stats=EngineNative.stats();
+                    java.util.regex.Matcher processed=java.util.regex.Pattern.compile("processed ([0-9]+)").matcher(stats);
+                    check(processed.find()&&Long.parseLong(processed.group(1))>0,"No paired audio processed: "+stats);
+                    String monitor=EngineNative.aecMonitor();
+                    check(monitor.contains("internal automatic delay tracking"),"AEC3 tracking mode missing");
+                    check(!monitor.contains("waiting for processed audio"),"AEC3 statistics not sampled");
+                    migration="\nLIVE DIAGNOSTIC (no recording):\n"+monitor;
+                } finally {
+                    context.stopService(new android.content.Intent(context,EngineService.class));
+                }
+            }
             if(migrate){
                 android.content.Intent activity=new android.content.Intent(context,EngineActivity.class)
                         .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
