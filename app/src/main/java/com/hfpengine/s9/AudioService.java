@@ -15,6 +15,8 @@ import android.util.Log;
 public final class AudioService extends Service {
     private static final String TAG = "HfpEngine";
     public static final String ACTION_TONE = "com.hfpengine.s9.TONE";
+    public static final String ACTION_AEC_START = "com.hfpengine.s9.AEC_START";
+    public static final String ACTION_AEC_FINISH = "com.hfpengine.s9.AEC_FINISH";
     public static final String ACTION_STOP = "com.hfpengine.s9.STOP_AUDIO";
     public static final String ACTION_RESTART = "com.hfpengine.s9.RESTART_AUDIO";
     public static volatile boolean running = false;
@@ -75,7 +77,18 @@ public final class AudioService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (ACTION_TONE.equals(action)) {
+        if (ACTION_AEC_START.equals(action)) {
+            NativeAudio.setAecDelay(intent.getIntExtra("delay",100));
+            lastStatus=NativeAudio.beginAecRecord(20);
+        } else if (ACTION_AEC_FINISH.equals(action)) {
+            // File export / offline DSP must never execute on the UI or audio callback thread.
+            new Thread(() -> {
+                String prefix=new java.io.File(getExternalFilesDir(null),"aec_"+System.currentTimeMillis()).getAbsolutePath();
+                String result=NativeAudio.finishAecRecord(prefix);
+                lastStatus=result+"\nWAV path prefix: "+prefix;
+                Log.i(TAG,lastStatus);
+            }, "aec-wav-export").start();
+        } else if (ACTION_TONE.equals(action)) {
             tone = intent.getBooleanExtra("enabled", false);
             try { NativeAudio.setTestTone(tone); } catch (Throwable ex) { Log.e(TAG,"Tone failed",ex); }
         } else if (ACTION_RESTART.equals(action)) {
