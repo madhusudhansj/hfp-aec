@@ -25,6 +25,7 @@ std::atomic<int64_t> gCapturedFrames{0}, gRenderedFrames{0};
 std::atomic<int> gLastError{0};
 std::array<int16_t, 256> gWave{};
 int32_t gOutChannels = 1, gOutputRate = 48000;
+std::string gSpeexLibPath = "libspeexdsp.so";
 double gPhase = 0.0; // Output callback only while stream is started.
 
 static aaudio_data_callback_result_t onInput(AAudioStream *, void *, void *buffer, int32_t frames) {
@@ -159,7 +160,7 @@ Java_com_hfpengine_s9_NativeAudio_start(JNIEnv *env, jclass, jint inputId, jint 
         stopLocked();
         return toJava(env, msg);
     }
-    AecDiag::start("/data/local/tmp/libspeexdsp.so", AAudioStream_getSampleRate(gInput), AAudioStream_getSampleRate(gOutput));
+    AecDiag::start(gSpeexLibPath, AAudioStream_getSampleRate(gInput), AAudioStream_getSampleRate(gOutput));
     // Start the output, then mic. No feedback loop: output is silence until test tone is enabled.
     r = AAudioStream_requestStart(gOutput);
     if (r == AAUDIO_OK) r = AAudioStream_requestStart(gInput);
@@ -230,4 +231,12 @@ Java_com_hfpengine_s9_NativeAudio_setAecDelay(JNIEnv*,jclass,jint ms) { AecDiag:
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_hfpengine_s9_NativeAudio_aecStatus(JNIEnv* env,jclass) {
     return env->NewStringUTF(AecDiag::status().c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_hfpengine_s9_NativeAudio_setSpeexPath(JNIEnv* env,jclass,jstring path) {
+    const char* p=env->GetStringUTFChars(path,nullptr);
+    std::lock_guard<std::mutex> lk(gControl);
+    gSpeexLibPath=p;
+    env->ReleaseStringUTFChars(path,p);
 }
