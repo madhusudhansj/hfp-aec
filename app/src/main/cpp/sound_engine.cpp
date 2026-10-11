@@ -150,6 +150,8 @@ public:
     std::atomic<int64_t> aecUpdatedMs{0};
     std::atomic<float> rawDb{-120},cleanDb{-120};
     std::atomic<int> rawPeak{0},cleanPeak{0};
+    std::atomic<int> maxRawPeak{0},maxCleanPeak{0};
+    std::atomic<bool> resetPeaks{false};
     std::atomic<uint64_t> cleanClipped{0},referenceMissing{0};
     std::atomic<int> error{0}, actualInChannels{0}, actualInRate{0},actualOutRate{0};
     std::atomic<uint64_t> captured{0},rendered{0},processed{0},processingNs{0},processingNsMax{0},stereoDifference{0},stereoEnergy{0};
@@ -161,7 +163,7 @@ public:
     std::string speechNote,speexPath;
     std::thread worker;
     int inputId=0,outputId=0,capturePreset=5,requestedChannels=1;
-    int reportedInId=0,reportedOutId=0;
+    int reportedInId=0,reportedOutId=0,actualPreset=0;
     double phase=0;
     uint32_t sampleIndex=0; // only touched in output callback
     static aaudio_data_callback_result_t inCb(AAudioStream*,void* context,void* data,int32_t frames){
@@ -245,6 +247,7 @@ public:
         actualInRate=AAudioStream_getSampleRate(input);
         actualOutRate=AAudioStream_getSampleRate(output);
         actualInChannels=AAudioStream_getChannelCount(input);
+        actualPreset=AAudioStream_getInputPreset(input);
         reportedInId=AAudioStream_getDeviceId(input);reportedOutId=AAudioStream_getDeviceId(output);
         if(actualInRate!=RATE||actualOutRate!=RATE||
            (actualInChannels!=1&&actualInChannels!=2)||AAudioStream_getChannelCount(output)!=1){
@@ -273,9 +276,19 @@ public:
         for(int i=0;i<BLOCK;++i){
             int value=std::abs(int(samples[i]));
             peak=std::max(peak,value); squares+=double(samples[i])*samples[i];
-            if(value>=32767)++clipped;
+            if(samples[i]==INT16_MIN || samples[i]==INT16_MAX)++clipped;
         }
         return float(10*std::log10(std::max(squares/BLOCK/(32768.0*32768.0),1e-12)));
+    }
+    void updatePeakHolds(int raw,int clean) {
+        if(resetPeaks.exchange(false)){maxRawPeak=0;maxCleanPeak=0;}
+        maxRawPeak=std::max(maxRawPeak.load(),raw);
+        maxCleanPeak=std::max(maxCleanPeak.load(),clean);
+    }
+    static int recordingPeak(const std::vector<int16_t>& samples,size_t count) {
+        int peak=0;
+        for(size_t i=0;i<count;i++)peak=std::max(peak,std::abs(int(samples[i])));
+        return peak;
     }
     // APM delay = (render time - reverse call) + (capture call - capture time).
     // The two calls are adjacent, so use the hardware times of their first samples.
@@ -383,6 +396,7 @@ public:
             int rp=0,cp=0;uint64_t rc=0,cc=0;
             rawDb=level(raw,rp,rc);cleanDb=level(clean,cp,cc);
             rawPeak=rp;cleanPeak=cp;cleanClipped.fetch_add(cc);
+            updatePeakHolds(rp,cp);
             // The worker's clean[] block is the future HFP uplink and is currently exported for listening.
             if(recordState.load(std::memory_order_acquire)==1){
                 const uint32_t offset=clipPos.load(std::memory_order_relaxed);
@@ -428,11 +442,14 @@ public:
                "\n \"actual_input_channels\":%d,"
                "\n \"mic_dropped\":%llu,\"reference_dropped\":%llu,"
                "\n \"apm_error\":%d,\"delay_setting_ms\":%d,\"timestamp_delay_ms\":%d,"
-               "\n \"agc_adaptive\":%s,\"reference_missing_blocks\":%llu\n}\n",
+               "\n \"agc_adaptive\":%s,\"reference_missing_blocks\":%llu,"
+               "\n \"requested_input_preset\":%d,\"actual_input_preset\":%d,"
+               "\n \"recording_raw_max_peak\":%d,\"recording_processed_max_peak\":%d\n}\n",
                n,engine,appliedDelay.load(),noise.load(),agc.load(),reportedInId,reportedOutId,
                actualInChannels.load(),(unsigned long long)mic.drops.load(),
                (unsigned long long)reference.drops.load(),lastApmError.load(),delay.load(),measuredDelay.load(),
-               agc.load()?"true":"false",(unsigned long long)referenceMissing.load());
+               agc.load()?"true":"false",(unsigned long long)referenceMissing.load(),capturePreset,actualPreset,
+               recordingPeak(recRaw,n),recordingPeak(recApm,n));
             if(ferror(meta))ok=false;
             if(fclose(meta)!=0)ok=false;
         }else ok=false;
@@ -493,6 +510,9 @@ public:
           <<"\nENGINE: "<<(mode==1?"WebRTC AEC3":(mode==2?"Speex":"Bypass"))
           <<"\nRaw mic RMS "<<rawDb.load()<<" dBFS; peak "<<rawPeak.load()<<" / 32768"
           <<"\nProcessed RMS "<<cleanDb.load()<<" dBFS; peak "<<cleanPeak.load()<<" / 32768"
+          <<"\nRaw MAX since arm/reset: "<<maxRawPeak.load()<<" / 32768"
+          <<"\nProcessed MAX since arm/reset: "<<maxCleanPeak.load()<<" / 32768"
+          <<"\nCapture preset requested / actual: "<<capturePreset<<" / "<<actualPreset
           <<"\nProcessed clipped samples "<<cleanClipped.load()
           <<"\nAdaptive speech gain "<<(agc?"ON (APM mode only)":"OFF")
           <<"\nStream delay: "<<(delay>=0?std::to_string(delay.load())+" ms manual":
@@ -577,4 +597,26 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_hfpengine_s9_EngineNative_aecMonitor(JNIEnv* env,jclass){
     std::lock_guard<std::mutex> lock(engineMutex);
     return str(env,engine?engine->monitor():"AEC3 monitor inactive — arm the sound engine.");
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_hfpengine_s9_EngineNative_resetPeakMeters(JNIEnv*,jclass){
+    std::lock_guard<std::mutex> lock(engineMutex);
+    if(engine)engine->resetPeaks=true;
+}
+// Deterministic meter verification: no hardware stream or microphone access.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_hfpengine_s9_EngineNative_verifyPeakMeters(JNIEnv*,jclass){
+    int16_t samples[BLOCK]{};
+    samples[0]=INT16_MIN;samples[1]=INT16_MAX;samples[2]=-32767;
+    int peak=0;uint64_t clipped=0;
+    float rms=Engine::level(samples,peak,clipped);
+    double expected=10*std::log10((32768.0*32768+2*32767.0*32767)/BLOCK/(32768.0*32768));
+    if(peak!=32768 || clipped!=2 || std::abs(rms-expected)>0.001)return JNI_FALSE;
+    std::vector<int16_t> recording{123,-200,32767,INT16_MIN};
+    if(Engine::recordingPeak(recording,recording.size())!=32768)return JNI_FALSE;
+    auto test=std::make_unique<Engine>();
+    test->updatePeakHolds(300,400);test->updatePeakHolds(100,200);
+    if(test->maxRawPeak!=300 || test->maxCleanPeak!=400)return JNI_FALSE;
+    test->resetPeaks=true;test->updatePeakHolds(50,60);
+    return test->maxRawPeak==50 && test->maxCleanPeak==60?JNI_TRUE:JNI_FALSE;
 }

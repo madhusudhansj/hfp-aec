@@ -20,6 +20,7 @@ public final class EngineService extends Service {
     static final String RECORD = "com.hfpengine.s9.ENGINE_RECORD";
     static final String EXPORT = "com.hfpengine.s9.ENGINE_EXPORT";
     static final String COPY_OLD = "com.hfpengine.s9.ENGINE_COPY_OLD";
+    static final String RESET_PEAKS = "com.hfpengine.s9.ENGINE_RESET_PEAKS";
     static volatile boolean running = false;
     static volatile String info = "Not started";
     static volatile boolean recording = false;
@@ -93,6 +94,9 @@ public final class EngineService extends Service {
                 }
             } else if (CONFIG.equals(action) && running) {
                 configure(intent);
+            } else if (RESET_PEAKS.equals(action) && running) {
+                EngineNative.resetPeakMeters();
+                info = "Session maximum peaks reset; recording WAV maxima are unaffected.";
             } else if (PLAY.equals(action) && running) {
                 EngineNative.setPlayback(intent.getIntExtra("play", 0));
             } else if (RECORD.equals(action) && running) {

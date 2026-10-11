@@ -26,7 +26,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private Button standbyButton, toneButton;
     private Spinner presetSpinner;
-    private final int[] presets = {5, 1, 6};
+    private final int[] presets = CapturePresets.ids();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
         presetText.setText("Internal mic preset (USB mic may ignore it):");
         col.addView(presetText);
         presetSpinner = new Spinner(this);
-        String[] labels = {"Camcorder (top mic candidate)", "Generic (bottom mic candidate)", "Voice Recognition"};
+        String[] labels = CapturePresets.labels();
         presetSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
         int selected = getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).getInt("preset", 5);
         for (int i=0; i<presets.length; ++i) if (presets[i] == selected) presetSpinner.setSelection(i);

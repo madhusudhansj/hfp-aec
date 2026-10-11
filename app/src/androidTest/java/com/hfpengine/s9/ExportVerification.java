@@ -74,6 +74,8 @@ public final class ExportVerification extends Instrumentation {
             check(new File(prefix+"_mic_raw.wav").isFile(),"Failure lost original recording");
             check(EngineNative.stats().contains("Sound engine stopped"),"Unexpected native engine state");
             check(EngineNative.aecMonitor().contains("inactive"),"Inactive AEC3 monitor unavailable");
+            check(EngineNative.verifyPeakMeters(),"PCM peak, RMS, clipping, hold, or reset check failed");
+            check(Arrays.equals(CapturePresets.ids(),new int[]{5,1,6,7,9,10}),"S9 capture presets incomplete");
             String migration="";
             if(live){
                 startActivitySync(new android.content.Intent(context,EngineActivity.class)
@@ -107,7 +109,7 @@ public final class ExportVerification extends Instrumentation {
                 check(EngineService.info.startsWith("Copied "),EngineService.info);
                 migration="\n"+EngineService.info;
             }
-            result.putString("stream","PASS: four public Downloads files, pending flags cleared, byte-exact WAV/JSON, incomplete-set rejection, native library loads; synthetic files cleaned."+migration+"\n");
+            result.putString("stream","PASS: public Downloads, byte-exact exports, incomplete-set rejection, native monitor, six capture presets, PCM peak/RMS/clipping boundaries, maximum peak hold/reset; synthetic files cleaned."+migration+"\n");
             outcome=-1;
         }catch(Throwable t){
             result.putString("stream","FAIL: "+android.util.Log.getStackTraceString(t));

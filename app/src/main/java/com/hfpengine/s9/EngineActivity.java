@@ -29,7 +29,7 @@ public final class EngineActivity extends Activity {
     private Spinner preset,engine,ns;
     private CheckBox stereo,agc,autoDelay;
     private EditText delay;
-    private final int[] presets={5,1,6};
+    private final int[] presets=CapturePresets.ids();
     private final Runnable refresh=new Runnable(){
         @Override public void run(){drawStatus();handler.postDelayed(this,1000);}
     };
@@ -50,7 +50,7 @@ public final class EngineActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(24,24,24,24);sv.addView(col);setContentView(sv);
         TextView head=new TextView(this);
-        head.setText("S9 HFP — Real-time Sound Engine v0.2.3");
+        head.setText("S9 HFP — Real-time Sound Engine v0.2.4");
         head.setTextSize(22);col.addView(head);
         TextView explain=new TextView(this);
         explain.setText("No Bluetooth bridge in this build. Uses your real mic and speaker plus WebRTC AEC3. Load a speech WAV, arm the test, then listen to exported raw and processed WAVs.");
@@ -60,7 +60,12 @@ public final class EngineActivity extends Activity {
         monitor.setTextSize(14);
         monitor.setPadding(0,16,0,16);
         col.addView(monitor);
-        preset=spinner(col,"Microphone preset",new String[]{"Camcorder","Generic","Voice recognition"});
+        preset=spinner(col,"Microphone capture preset",CapturePresets.labels());
+        int savedPreset=getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getInt("engine_preset",5);
+        for(int i=0;i<presets.length;i++)if(presets[i]==savedPreset)preset.setSelection(i);
+        TextView presetHelp=new TextView(this);
+        presetHelp.setText("Tap Arm / restart after changing the capture preset. Unprocessed may be quieter; Voice communication may add Android/vendor processing. Presets do not guarantee a particular physical mic. Stereo meters measure the downmixed mono signal.");
+        col.addView(presetHelp);
         stereo=new CheckBox(this);stereo.setText("Probe two-channel microphone input (downmixed for AEC)");
         col.addView(stereo);
         engine=spinner(col,"Sound processor",new String[]{"Bypass/raw","WebRTC APM (AEC3 + NS)","SpeexDSP baseline (optional)"});
@@ -83,6 +88,7 @@ public final class EngineActivity extends Activity {
         button(col,"Import speech WAV (PCM16 mono/stereo)",this::pickWav);
         button(col,"Arm / restart real-time engine",this::arm);
         button(col,"Apply AEC / noise settings",()->send(EngineService.CONFIG,-1));
+        button(col,"Reset maximum peak meters",()->send(EngineService.RESET_PEAKS,-1));
         button(col,"Play speech fixture through speaker",()->send(EngineService.PLAY,1));
         button(col,"Play diagnostic tone",()->send(EngineService.PLAY,2));
         button(col,"Stop speaker playback",()->send(EngineService.PLAY,0));
@@ -125,6 +131,8 @@ public final class EngineActivity extends Activity {
         }
         // Stop old diagnostic capture before opening another microphone stream.
         stopService(new Intent(this,AudioService.class));
+        getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).edit()
+                .putInt("engine_preset",presets[preset.getSelectedItemPosition()]).apply();
         send(EngineService.START,-1);
     }
     private void pickWav(){

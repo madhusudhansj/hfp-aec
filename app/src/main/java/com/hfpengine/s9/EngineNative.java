@@ -14,4 +14,6 @@ final class EngineNative {
     static native String export(String prefix);
     static native String stats();
     static native String aecMonitor();
+    static native void resetPeakMeters();
+    static native boolean verifyPeakMeters();
 }

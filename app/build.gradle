@@ -12,8 +12,8 @@ android {
         // This is a dedicated Android 12L prototype, not a Play Store release.
         // Background mic constraints still apply even with targetSdk 32.
         targetSdk 32
-        versionCode 5
-        versionName '0.2.3'
+        versionCode 6
+        versionName '0.2.4'
         testInstrumentationRunner 'com.hfpengine.s9.ExportVerification'
         externalNativeBuild {
             cmake { cppFlags '-std=c++20 -Wall -Wextra' }
