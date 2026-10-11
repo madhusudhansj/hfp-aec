@@ -15,10 +15,12 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <time.h>
 #include <vector>
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,"S9SoundEngine",__VA_ARGS__)
@@ -138,7 +140,14 @@ public:
     AAudioStream *input=nullptr,*output=nullptr;
     Spsc<RING_SIZE> mic,reference;
     std::atomic<bool> running{false},playing{false},tone{false};
-    std::atomic<int> mode{1},noise{1},agc{0},delay{80},configVersion{1},lastApmError{0};
+    std::atomic<int> mode{1},noise{1},agc{0},delay{-1},configVersion{1},lastApmError{0};
+    std::atomic<int> measuredDelay{-1},appliedDelay{80},aecDelay{-1};
+    std::atomic<int> aecMedian{-1},aecDeviation{-1};
+    std::atomic<float> erl{NAN},erle{NAN},residualEcho{NAN},divergence{NAN};
+    std::atomic<int64_t> aecUpdatedMs{0};
+    std::atomic<float> rawDb{-120},cleanDb{-120};
+    std::atomic<int> rawPeak{0},cleanPeak{0};
+    std::atomic<uint64_t> cleanClipped{0},referenceMissing{0};
     std::atomic<int> error{0}, actualInChannels{0}, actualInRate{0},actualOutRate{0};
     std::atomic<uint64_t> captured{0},rendered{0},processed{0},processingNs{0},processingNsMax{0},stereoDifference{0},stereoEnergy{0};
     std::atomic<bool> speexAvailable{false};
@@ -256,11 +265,34 @@ public:
         recordState=0;
     }
     ~Engine(){stop();}
+    static float level(const int16_t* samples, int& peak, uint64_t& clipped) {
+        double squares=0; peak=0; clipped=0;
+        for(int i=0;i<BLOCK;++i){
+            int value=std::abs(int(samples[i]));
+            peak=std::max(peak,value); squares+=double(samples[i])*samples[i];
+            if(value>=32767)++clipped;
+        }
+        return float(10*std::log10(std::max(squares/BLOCK/(32768.0*32768.0),1e-12)));
+    }
+    // APM delay = (render time - reverse call) + (capture call - capture time).
+    // The two calls are adjacent, so use the hardware times of their first samples.
+    int timestampDelay(uint64_t micFrame, uint64_t renderFrame) {
+        int64_t ip=0,it=0,op=0,ot=0;
+        if(AAudioStream_getTimestamp(input,CLOCK_MONOTONIC,&ip,&it)!=AAUDIO_OK ||
+           AAudioStream_getTimestamp(output,CLOCK_MONOTONIC,&op,&ot)!=AAUDIO_OK)return -1;
+        double captureTime=double(it)+(double(micFrame)-ip)*1e9/RATE;
+        double renderTime=double(ot)+(double(renderFrame)-op)*1e9/RATE;
+        double ms=(renderTime-captureTime)/1e6;
+        if(!std::isfinite(ms)||ms < -10 || ms > 500)return -1;
+        return std::clamp(int(std::lround(ms)),0,500);
+    }
     void process(){
         webrtc::scoped_refptr<webrtc::AudioProcessing> apm;
         const webrtc::StreamConfig format(RATE,1);
         Speex speex;
         int lastVersion=-1;
+        uint64_t micFrame=0,renderFrame=0,blocks=0;
+        bool referenceContinuous=true;
         int16_t raw[BLOCK]{},far[BLOCK]{},farForApm[BLOCK]{},clean[BLOCK]{};
         while(running.load(std::memory_order_acquire)){
             if(recordState.load(std::memory_order_acquire)==2)recordState.store(3,std::memory_order_release);
@@ -268,11 +300,24 @@ public:
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
-            if(!reference.pop(far,BLOCK))std::memset(far,0,sizeof(far));
+            bool haveReference=reference.pop(far,BLOCK);
+            if(!haveReference){
+                std::memset(far,0,sizeof(far));
+                referenceMissing.fetch_add(1); referenceContinuous=false;
+            }
+            if(blocks%10==0){
+                measuredDelay = referenceContinuous && mic.drops==0 && reference.drops==0
+                        ? timestampDelay(micFrame,renderFrame) : -1;
+            }
+            micFrame+=BLOCK;
+            if(haveReference)renderFrame+=BLOCK;
+            ++blocks;
             auto start=Clock::now();
             const int version=configVersion.load(std::memory_order_relaxed);
             if(version!=lastVersion){
                 lastVersion=version;
+                aecDelay=-1; aecMedian=-1; aecDeviation=-1;
+                erl=NAN; erle=NAN; residualEcho=NAN; divergence=NAN; aecUpdatedMs=0;
                 webrtc::AudioProcessing::Config cfg;
                 cfg.echo_canceller.enabled=true;
                 cfg.high_pass_filter.enabled=true;
@@ -281,6 +326,10 @@ public:
                     webrtc::AudioProcessing::Config::NoiseSuppression::kHigh :
                     webrtc::AudioProcessing::Config::NoiseSuppression::kModerate;
                 cfg.gain_controller2.enabled=agc.load()!=0;
+                cfg.gain_controller2.adaptive_digital.enabled=agc.load()!=0;
+                cfg.gain_controller2.adaptive_digital.max_gain_db=30.0f;
+                cfg.gain_controller2.adaptive_digital.initial_gain_db=6.0f;
+                cfg.gain_controller2.adaptive_digital.headroom_db=6.0f;
                 apm=webrtc::BuiltinAudioProcessingBuilder(cfg).Build(webrtc::CreateEnvironment());
                 if(!apm)LOGE("APM builder failed");
                 if(mode.load()==2) {
@@ -294,15 +343,32 @@ public:
             if(active==1 && apm){
                 std::memcpy(farForApm,far,sizeof(far));
                 int e1=apm->ProcessReverseStream(farForApm,format,format,farForApm);
-                apm->set_stream_delay_ms(delay.load());
+                int requested=delay.load(),estimate=measuredDelay.load();
+                int used=requested>=0?requested:(estimate>=0?estimate:80);
+                appliedDelay=used;
+                int delayError=apm->set_stream_delay_ms(used);
                 int e2=apm->ProcessStream(raw,format,format,clean);
-                if(e1||e2)lastApmError.store(e1?e1:e2);
+                if(e1||e2||delayError)lastApmError.store(e1?e1:(e2?e2:delayError));
+                if(blocks%100==0){
+                    auto diagnostics=apm->GetStatistics();
+                    aecDelay=diagnostics.delay_ms.value_or(-1);
+                    aecMedian=diagnostics.delay_median_ms.value_or(-1);
+                    aecDeviation=diagnostics.delay_standard_deviation_ms.value_or(-1);
+                    erl=float(diagnostics.echo_return_loss.value_or(NAN));
+                    erle=float(diagnostics.echo_return_loss_enhancement.value_or(NAN));
+                    residualEcho=float(diagnostics.residual_echo_likelihood.value_or(NAN));
+                    divergence=float(diagnostics.divergent_filter_fraction.value_or(NAN));
+                    aecUpdatedMs=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+                }
             }else if(active==2 && speex.echo){
                 speex.cancel(speex.echo,raw,far,clean);
             }
+            int rp=0,cp=0;uint64_t rc=0,cc=0;
+            rawDb=level(raw,rp,rc);cleanDb=level(clean,cp,cc);
+            rawPeak=rp;cleanPeak=cp;cleanClipped.fetch_add(cc);
             // The worker's clean[] block is the future HFP uplink and is currently exported for listening.
-            const uint32_t offset=clipPos.load(std::memory_order_relaxed);
             if(recordState.load(std::memory_order_acquire)==1){
+                const uint32_t offset=clipPos.load(std::memory_order_relaxed);
                 if(offset+BLOCK<=recRaw.size()){
                     std::memcpy(recRaw.data()+offset,raw,sizeof(raw));
                     std::memcpy(recApm.data()+offset,clean,sizeof(clean));
@@ -332,7 +398,7 @@ public:
         for(int i=0;i<250 && recordState!=3;i++)std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if(recordState!=3)return "Recording worker did not acknowledge stop; not exporting";
         const size_t n=clipPos.load();
-        if(n<480)return "No microphone audio captured";
+        if(n<480){recordState=0;return "No microphone audio captured";}
         bool ok=wav(prefix+"_mic_raw.wav",recRaw,n) &&
                 wav(prefix+"_mic_processed.wav",recApm,n) &&
                 wav(prefix+"_farend_reference.wav",recRef,n);
@@ -344,15 +410,48 @@ public:
                "\n \"input_device_id\":%d,\"output_device_id\":%d,"
                "\n \"actual_input_channels\":%d,"
                "\n \"mic_dropped\":%llu,\"reference_dropped\":%llu,"
-               "\n \"apm_error\":%d\n}\n",
-               n,engine,delay.load(),noise.load(),agc.load(),reportedInId,reportedOutId,
+               "\n \"apm_error\":%d,\"delay_setting_ms\":%d,\"timestamp_delay_ms\":%d,"
+               "\n \"agc_adaptive\":%s,\"reference_missing_blocks\":%llu\n}\n",
+               n,engine,appliedDelay.load(),noise.load(),agc.load(),reportedInId,reportedOutId,
                actualInChannels.load(),(unsigned long long)mic.drops.load(),
-               (unsigned long long)reference.drops.load(),lastApmError.load());
-            fclose(meta);
-        }
-        recordState=0;
+               (unsigned long long)reference.drops.load(),lastApmError.load(),delay.load(),measuredDelay.load(),
+               agc.load()?"true":"false",(unsigned long long)referenceMissing.load());
+            if(ferror(meta))ok=false;
+            if(fclose(meta)!=0)ok=false;
+        }else ok=false;
+        recordState=ok?0:3;
         return ok?"Saved 3 synchronized PCM WAVs + metadata at "+prefix:
                   "WAV export failed; check storage access";
+    }
+    static std::string metric(float value,const char* unit="") {
+        if(!std::isfinite(value))return "not available";
+        std::ostringstream out;out.setf(std::ios::fixed);out.precision(1);
+        out<<value<<unit;return out.str();
+    }
+    static std::string milliseconds(int value) {
+        return value<0?"not available":std::to_string(value)+" ms";
+    }
+    std::string monitor() const {
+        if(mode.load()!=1)return "AEC3 inactive — select WebRTC APM to view echo metrics.";
+        std::ostringstream o;
+        int64_t updated=aecUpdatedMs.load();
+        int64_t now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+        o<<"AEC3 LIVE MONITOR"
+         <<"\nMetrics: "<<(updated?"last sampled "+std::to_string(std::max(int64_t(0),now-updated))+" ms ago":"waiting for processed audio")
+         <<"\nStream delay sent to APM: "<<appliedDelay.load()<<" ms"
+         <<(delay>=0?" (manual)":(measuredDelay>=0?" (hardware estimate)":" (unmeasured fallback)"))
+         <<"\nHardware stream estimate: "<<milliseconds(measuredDelay.load())
+         <<"\nAEC3 internal delay estimate: "<<milliseconds(aecDelay.load())
+         <<"\nDelay median / standard deviation: "<<milliseconds(aecMedian.load())<<" / "<<milliseconds(aecDeviation.load())
+         <<"\nEcho reduction (ERLE): "<<metric(erle.load()," dB")
+         <<"\nEcho return loss (ERL): "<<metric(erl.load()," dB")
+         <<"\nResidual echo likelihood: "<<metric(residualEcho.load()*100,"%")
+         <<"\nDivergent filter fraction: "<<metric(divergence.load()*100,"%")
+         <<"\nTotal DSP level change: "<<metric(cleanDb.load()-rawDb.load()," dB (includes NS / AGC)")
+         <<"\nReference gaps: "<<referenceMissing.load()<<"; dropped samples mic / render: "<<mic.drops.load()<<" / "<<reference.drops.load()
+         <<"\nAPM error: "<<lastApmError.load()<<"; audio stream error: "<<error.load()
+         <<"\nPlay far-end speech for echo estimates. Unavailable values are not zero correction.";
+        return o.str();
     }
     std::string stats() const {
         std::ostringstream o;
@@ -360,6 +459,14 @@ public:
         double ms=p?double(processingNs.load())/(p/BLOCK)/1e6:0.;
         o<<"APM WORKER: "<<(running?"RUNNING":"STOPPED")
           <<"\nENGINE: "<<(mode==1?"WebRTC AEC3":(mode==2?"Speex":"Bypass"))
+          <<"\nRaw mic RMS "<<rawDb.load()<<" dBFS; peak "<<rawPeak.load()<<" / 32768"
+          <<"\nProcessed RMS "<<cleanDb.load()<<" dBFS; peak "<<cleanPeak.load()<<" / 32768"
+          <<"\nProcessed clipped samples "<<cleanClipped.load()
+          <<"\nAdaptive speech gain "<<(agc?"ON (APM mode only)":"OFF")
+          <<"\nStream delay: "<<(delay>=0?std::to_string(delay.load())+" ms manual":
+                  (measuredDelay>=0?std::to_string(measuredDelay.load())+" ms timestamp estimate":"80 ms FALLBACK; timing unavailable / reference gaps"))
+          <<"\nAEC internal delay: "<<(aecDelay>=0?std::to_string(aecDelay.load())+" ms":"not available")
+          <<"\nReference missing blocks "<<referenceMissing.load()
           <<"\nCapture device "<<reportedInId<<", channels "<<actualInChannels
           <<", rate "<<actualInRate<<"\nOutput device "<<reportedOutId<<", rate "<<actualOutRate
           <<"\nMic frames "<<captured<<"; played "<<rendered<<"; processed "<<p
@@ -415,7 +522,7 @@ Java_com_hfpengine_s9_EngineNative_config(JNIEnv*,jclass,jint mode,jint ns,jbool
         engine->mode=std::clamp(int(mode),0,2);
         engine->noise=std::clamp(int(ns),0,2);
         engine->agc=agc==JNI_TRUE;
-        engine->delay=std::clamp(int(delay),0,700);
+        engine->delay=std::clamp(int(delay),-1,500);
         engine->configVersion.fetch_add(1);
     }
 }
@@ -433,4 +540,9 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_hfpengine_s9_EngineNative_stats(JNIEnv* env,jclass){
     std::lock_guard<std::mutex> lock(engineMutex);
     return str(env,engine?engine->stats():"Sound engine stopped");
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_hfpengine_s9_EngineNative_aecMonitor(JNIEnv* env,jclass){
+    std::lock_guard<std::mutex> lock(engineMutex);
+    return str(env,engine?engine->monitor():"AEC3 monitor inactive — arm the sound engine.");
 }

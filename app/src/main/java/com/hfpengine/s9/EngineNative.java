@@ -8,9 +8,10 @@ final class EngineNative {
     static native void stop();
     // 0 = silent, 1 = WAV speech loop, 2 = quiet 660-Hz diagnostic tone.
     static native void setPlayback(int mode);
-    // 0 = bypass, 1 = WebRTC APM, 2 = optional Speex.
+    // 0 = bypass, 1 = WebRTC APM, 2 = optional Speex; delay -1 = timestamp estimate.
     static native void config(int engineMode, int noiseSuppression, boolean agc, int delayMs);
     static native boolean record();
     static native String export(String prefix);
     static native String stats();
+    static native String aecMonitor();
 }

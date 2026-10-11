@@ -25,9 +25,9 @@ import java.io.InputStream;
 public final class EngineActivity extends Activity {
     private static final int REQ_MIC=230, REQ_FILE=231;
     private final Handler handler=new Handler(Looper.getMainLooper());
-    private TextView status;
+    private TextView status,monitor;
     private Spinner preset,engine,ns;
-    private CheckBox stereo,agc;
+    private CheckBox stereo,agc,autoDelay;
     private EditText delay;
     private final int[] presets={5,1,6};
     private final Runnable refresh=new Runnable(){
@@ -50,11 +50,16 @@ public final class EngineActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(24,24,24,24);sv.addView(col);setContentView(sv);
         TextView head=new TextView(this);
-        head.setText("S9 HFP — Real-time Sound Engine v0.2");
+        head.setText("S9 HFP — Real-time Sound Engine v0.2.2");
         head.setTextSize(22);col.addView(head);
         TextView explain=new TextView(this);
         explain.setText("No Bluetooth bridge in this build. Uses your real mic and speaker plus WebRTC AEC3. Load a speech WAV, arm the test, then listen to exported raw and processed WAVs.");
         col.addView(explain);
+        monitor=new TextView(this);
+        monitor.setTextIsSelectable(true);
+        monitor.setTextSize(14);
+        monitor.setPadding(0,16,0,16);
+        col.addView(monitor);
         preset=spinner(col,"Microphone preset",new String[]{"Camcorder","Generic","Voice recognition"});
         stereo=new CheckBox(this);stereo.setText("Probe two-channel microphone input (downmixed for AEC)");
         col.addView(stereo);
@@ -62,11 +67,18 @@ public final class EngineActivity extends Activity {
         engine.setSelection(1);
         ns=spinner(col,"Noise suppression",new String[]{"Off","Moderate","High"});
         ns.setSelection(1);
-        agc=new CheckBox(this);agc.setText("Enable WebRTC AGC2 (start unchecked)");col.addView(agc);
+        agc=new CheckBox(this);agc.setText("Automatically raise speech level (WebRTC AGC2)");col.addView(agc);
+        TextView gainHelp=new TextView(this);
+        gainHelp.setText("AGC2 adjusts digital gain after echo/noise removal. Raw mic stays unchanged. Enable for quiet speech; watch processed level and clipping below.");
+        col.addView(gainHelp);
+        autoDelay=new CheckBox(this);autoDelay.setText("Estimate stream delay from audio timestamps");
+        autoDelay.setChecked(true);col.addView(autoDelay);
         delay=new EditText(this);delay.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         delay.setText("80");col.addView(delay);
+        delay.setEnabled(false);
+        autoDelay.setOnCheckedChangeListener((v,checked)->delay.setEnabled(!checked));
         TextView dLabel=new TextView(this);
-        dLabel.setText("AEC stream delay in ms (0–700; this is a calibration control, not measured)");
+        dLabel.setText("Manual delay in ms (0–500). Auto uses hardware timing when available, otherwise an explicit 80 ms fallback. This is not total call latency or a guaranteed acoustic delay.");
         col.addView(dLabel);
         button(col,"Import speech WAV (PCM16 mono/stereo)",this::pickWav);
         button(col,"Arm / restart real-time engine",this::arm);
@@ -75,18 +87,24 @@ public final class EngineActivity extends Activity {
         button(col,"Play diagnostic tone",()->send(EngineService.PLAY,2));
         button(col,"Stop speaker playback",()->send(EngineService.PLAY,0));
         button(col,"Start synchronized recording (max 30s)",()->send(EngineService.RECORD,-1));
-        button(col,"Stop recording and export WAVs",()->send(EngineService.EXPORT,-1));
+        button(col,"Stop / retry export to Downloads",()->send(EngineService.EXPORT,-1));
+        TextView exportHelp=new TextView(this);
+        exportHelp.setText("Find all 3 WAVs and metadata in Files by Google → Downloads → S9 HFP Tests. Compare raw and processed speech at the same playback volume.");
+        col.addView(exportHelp);
+        button(col,"Copy earlier exports to Downloads",()->send(EngineService.COPY_OLD,-1));
         button(col,"Stop sound engine",()->stopService(new Intent(this,EngineService.class)));
         status=new TextView(this);status.setTextIsSelectable(true);status.setTextSize(12);
         col.addView(status);
         drawStatus();
     }
     private int delayMs(){
-        try{return Math.max(0,Math.min(700,Integer.parseInt(delay.getText().toString())));}
+        if(autoDelay.isChecked())return -1;
+        try{return Math.max(0,Math.min(500,Integer.parseInt(delay.getText().toString())));}
         catch(Exception e){return 80;}
     }
     private void send(String action,int play){
-        if(!EngineService.running && !EngineService.START.equals(action)){
+        if(!EngineService.running && !EngineService.START.equals(action)
+                && !EngineService.COPY_OLD.equals(action) && !EngineService.EXPORT.equals(action)){
             Toast.makeText(this,"Arm sound engine first",Toast.LENGTH_SHORT).show();return;
         }
         Intent i=new Intent(this,EngineService.class).setAction(action)
@@ -97,7 +115,8 @@ public final class EngineActivity extends Activity {
                 .putExtra("preset",presets[preset.getSelectedItemPosition()])
                 .putExtra("stereo",stereo.isChecked());
         if(play>=0)i.putExtra("play",play);
-        if(EngineService.START.equals(action))startForegroundService(i);
+        if(EngineService.START.equals(action) || EngineService.COPY_OLD.equals(action)
+                || EngineService.EXPORT.equals(action))startForegroundService(i);
         else startService(i);
     }
     private void arm(){
@@ -146,9 +165,12 @@ public final class EngineActivity extends Activity {
     }
     private void drawStatus(){
         if(status==null)return;
+        monitor.setText(EngineService.running?EngineService.aecMonitor:
+                "AEC3 monitor inactive — arm the sound engine.");
         String nativeStats="(inactive)";
         if(EngineService.running){
-            try{nativeStats=EngineNative.stats();}catch(Throwable t){nativeStats=t.toString();}
+            EngineService.refreshStats();
+            nativeStats=EngineService.nativeStatus;
         }
         status.setText("ACTIVE: "+EngineService.running+" RECORDING: "+EngineService.recording+
                 "\n"+EngineService.info+"\n\n"+nativeStats+"\n\n"+AudioDevices.describe(this));
