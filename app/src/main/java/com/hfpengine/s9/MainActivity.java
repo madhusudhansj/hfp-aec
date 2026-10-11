@@ -38,12 +38,12 @@ public final class MainActivity extends Activity {
         setContentView(scroll);
 
         TextView heading = new TextView(this);
-        heading.setText("S9 HFP Audio Engine — v0.1");
+        heading.setText("S9 HFP Audio Engine — v0.2 diagnostic");
         heading.setTextSize(22);
         heading.setTypeface(null, Typeface.BOLD);
         col.addView(heading);
         TextView note = new TextView(this);
-        note.setText("Stage 1: foreground services + real AAudio microphone capture and output route diagnostics. No HCI injection or AEC yet. Test tone is quiet; do not hold speaker next to your ear.");
+        note.setText("Stage 1: foreground services + real AAudio microphone capture and output route diagnostics. No HCI injection yet. SpeexDSP offline comparison is available if its native library can load. Test tone is quiet; do not hold speaker next to your ear.");
         note.setPadding(0, 12, 0, 12);
         col.addView(note);
 
@@ -80,6 +80,26 @@ public final class MainActivity extends Activity {
             intent.putExtra("enabled", on);
             startService(intent);
             refresh();
+        });
+        TextView aecLabel = new TextView(this);
+        aecLabel.setText("Speex reference delay (ms):");
+        col.addView(aecLabel);
+        android.widget.EditText delayField = new android.widget.EditText(this);
+        delayField.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        delayField.setText("100");
+        col.addView(delayField);
+        button(col, "Start 20s AEC recording", () -> {
+            if (!AudioService.running) { toast("Arm audio first"); return; }
+            int delay = 100;
+            try { delay = Integer.parseInt(delayField.getText().toString()); } catch (Exception ignored) {}
+            Intent i = new Intent(this, AudioService.class).setAction(AudioService.ACTION_AEC_START);
+            i.putExtra("delay",delay);
+            startService(i);
+        });
+        button(col, "Finish / Export WAV comparison", () -> {
+            if (!AudioService.running) { toast("Arm audio first"); return; }
+            command(AudioService.ACTION_AEC_FINISH);
+            toast("Export started; check status/logcat for file path");
         });
         button(col, "Stop microphone / audio engine", () -> {
             stopService(new Intent(this, AudioService.class));
@@ -134,6 +154,7 @@ public final class MainActivity extends Activity {
                 + "\nTEST TONE: " + AudioService.tone
                 + "\n\n" + AudioService.lastStatus
                 + "\n\n" + nativeState
+                + "\n\n" + NativeAudio.aecStatus()
                 + "\n\n" + AudioDevices.describe(this)
                 + "\nStage 2: WebRTC APM; Stage 3: privileged HCI bridge.\n");
     }
