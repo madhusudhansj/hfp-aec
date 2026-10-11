@@ -1,0 +1,6 @@
+id=s9_hfp_reconnect
+name=S9 paired phone boot reconnect
+version=1.0
+versionCode=1
+author=HFP Engine project
+description=Bounded enabled-profile reconnect after HFP Engine standby starts. Uses the paired device in the root-only device file.
