@@ -50,10 +50,10 @@ public final class EngineActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(24,24,24,24);sv.addView(col);setContentView(sv);
         TextView head=new TextView(this);
-        head.setText("S9 HFP — Real-time Sound Engine v0.2.4");
+        head.setText("S9 HFP — Real-time Sound Engine v0.3.0");
         head.setTextSize(22);col.addView(head);
         TextView explain=new TextView(this);
-        explain.setText("No Bluetooth bridge in this build. Uses your real mic and speaker plus WebRTC AEC3. Load a speech WAV, arm the test, then listen to exported raw and processed WAVs.");
+        explain.setText("Diagnostic path: real mic and speaker plus WebRTC AEC3. Arming this test pauses Bluetooth standby. Load a speech WAV, arm the test, then listen to exported raw and processed WAVs. Re-enable standby on the main page when finished.");
         col.addView(explain);
         monitor=new TextView(this);
         monitor.setTextIsSelectable(true);
@@ -69,18 +69,21 @@ public final class EngineActivity extends Activity {
         stereo=new CheckBox(this);stereo.setText("Probe two-channel microphone input (downmixed for AEC)");
         col.addView(stereo);
         engine=spinner(col,"Sound processor",new String[]{"Bypass/raw","WebRTC APM (AEC3 + NS)","SpeexDSP baseline (optional)"});
-        engine.setSelection(1);
+        engine.setSelection(getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getInt("engine_mode",1));
         ns=spinner(col,"Noise suppression",new String[]{"Off","Moderate","High"});
-        ns.setSelection(1);
+        ns.setSelection(getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getInt("engine_ns",1));
         agc=new CheckBox(this);agc.setText("Automatically raise speech level (WebRTC AGC2)");col.addView(agc);
+        agc.setChecked(getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getBoolean("engine_agc",false));
+        stereo.setChecked(getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getBoolean("engine_stereo",false));
         TextView gainHelp=new TextView(this);
         gainHelp.setText("AGC2 adjusts digital gain after echo/noise removal. Raw mic stays unchanged. Enable for quiet speech; watch processed level and clipping below.");
         col.addView(gainHelp);
         autoDelay=new CheckBox(this);autoDelay.setText("Estimate stream delay from audio timestamps");
-        autoDelay.setChecked(true);col.addView(autoDelay);
+        int savedDelay=getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getInt("engine_delay",-1);
+        autoDelay.setChecked(savedDelay<0);col.addView(autoDelay);
         delay=new EditText(this);delay.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        delay.setText("80");col.addView(delay);
-        delay.setEnabled(false);
+        delay.setText(String.valueOf(savedDelay<0?80:savedDelay));col.addView(delay);
+        delay.setEnabled(savedDelay>=0);
         autoDelay.setOnCheckedChangeListener((v,checked)->delay.setEnabled(!checked));
         TextView dLabel=new TextView(this);
         dLabel.setText("External stream-delay hint (0–500 ms). Auto tries hardware timestamps, with an 80 ms fallback. AEC3 independently tracks echo alignment; this value does not lock it to 80 ms. Timestamp errors appear in the monitor.");
@@ -121,16 +124,20 @@ public final class EngineActivity extends Activity {
                 .putExtra("preset",presets[preset.getSelectedItemPosition()])
                 .putExtra("stereo",stereo.isChecked());
         if(play>=0)i.putExtra("play",play);
+        i.putExtra("mic_route",getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getInt("engine_mic_route",0));
+        if(EngineService.START.equals(action)||EngineService.CONFIG.equals(action))EngineSettings.save(this,i);
         if(EngineService.START.equals(action) || EngineService.COPY_OLD.equals(action)
                 || EngineService.EXPORT.equals(action))startForegroundService(i);
         else startService(i);
     }
     private void arm(){
+        if(EngineService.callMode){Toast.makeText(this,"End the Bluetooth call before starting diagnostics",Toast.LENGTH_SHORT).show();return;}
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},REQ_MIC);return;
         }
         // Stop old diagnostic capture before opening another microphone stream.
         stopService(new Intent(this,AudioService.class));
+        stopService(new Intent(this,StandbyService.class));
         getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).edit()
                 .putInt("engine_preset",presets[preset.getSelectedItemPosition()]).apply();
         send(EngineService.START,-1);

@@ -1,145 +1,70 @@
 package com.hfpengine.s9;
-
 import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Looper;
-import android.view.View;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.Spinner;
-import android.widget.TextView;
-import android.widget.Toast;
-
+import android.widget.*;
 public final class MainActivity extends Activity {
-    private static final int MIC_REQUEST = 1;
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable update = new Runnable() {
-        @Override public void run() { refresh(); handler.postDelayed(this, 900); }
-    };
-    private TextView status;
-    private Button standbyButton, toneButton;
-    private Spinner presetSpinner;
-    private final int[] presets = CapturePresets.ids();
-
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout col = new LinearLayout(this);
-        col.setPadding(28, 28, 28, 28);
-        col.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(col);
-        setContentView(scroll);
-
-        TextView heading = new TextView(this);
-        heading.setText("S9 HFP Audio Engine — v0.2");
-        heading.setTextSize(22);
-        heading.setTypeface(null, Typeface.BOLD);
-        col.addView(heading);
-        TextView note = new TextView(this);
-        note.setText("Stage 1: foreground services + real AAudio microphone capture and output route diagnostics. No HCI injection or AEC yet. Test tone is quiet; do not hold speaker next to your ear.");
-        note.setPadding(0, 12, 0, 12);
-        col.addView(note);
-
-        standbyButton = button(col, "Enable boot standby", () -> {
-            boolean enabled = !getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE)
-                    .getBoolean("boot_standby", false);
-            getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).edit()
-                    .putBoolean("boot_standby", enabled).apply();
-            if (enabled && !AudioService.running) startForegroundService(new Intent(this, StandbyService.class));
-            if (!enabled) stopService(new Intent(this, StandbyService.class));
-            refresh();
-        });
-        TextView presetText = new TextView(this);
-        presetText.setText("Internal mic preset (USB mic may ignore it):");
-        col.addView(presetText);
-        presetSpinner = new Spinner(this);
-        String[] labels = CapturePresets.labels();
-        presetSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
-        int selected = getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).getInt("preset", 5);
-        for (int i=0; i<presets.length; ++i) if (presets[i] == selected) presetSpinner.setSelection(i);
-        col.addView(presetSpinner);
-
-        button(col, "Open v0.2 WebRTC AEC3 sound-engine test", () -> {
-            startActivity(new Intent(this, EngineActivity.class));
-        });
-        button(col, "Arm native audio (foreground)", this::armAudio);
-        button(col, "Apply selected mic preset / route", () -> {
-            int preset = presets[presetSpinner.getSelectedItemPosition()];
-            getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).edit().putInt("preset",preset).apply();
-            if (AudioService.running) command(AudioService.ACTION_RESTART);
-            refresh();
-        });
-        toneButton = button(col, "Play quiet reference tone", () -> {
-            if (!AudioService.running) { toast("Arm audio first"); return; }
-            boolean on = !AudioService.tone;
-            Intent intent = new Intent(this, AudioService.class).setAction(AudioService.ACTION_TONE);
-            intent.putExtra("enabled", on);
-            startService(intent);
-            refresh();
-        });
-        button(col, "Stop microphone / audio engine", () -> {
-            stopService(new Intent(this, AudioService.class));
-            if (getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).getBoolean("boot_standby", false))
-                startForegroundService(new Intent(this, StandbyService.class));
-            refresh();
-        });
-        button(col, "Refresh devices and levels", this::refresh);
-        status = new TextView(this);
-        status.setTextIsSelectable(true);
-        status.setTypeface(Typeface.MONOSPACE);
-        status.setTextSize(13);
-        status.setPadding(0, 20, 0, 40);
-        col.addView(status);
-        refresh();
-    }
-    private Button button(LinearLayout target, String label, Runnable r) {
-        Button b = new Button(this); b.setText(label); b.setAllCaps(false);
-        target.addView(b);
-        b.setOnClickListener(v -> r.run());
-        return b;
-    }
-    private void command(String action) { startService(new Intent(this, AudioService.class).setAction(action)); }
-    private void armAudio() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MIC_REQUEST);
-            return;
-        }
-        getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).edit()
-                .putInt("preset", presets[presetSpinner.getSelectedItemPosition()]).apply();
-        startForegroundService(new Intent(this, AudioService.class));
-    }
-    @Override public void onRequestPermissionsResult(int req, String[] permissions, int[] grants) {
-        super.onRequestPermissionsResult(req, permissions, grants);
-        if (req == MIC_REQUEST && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED)
-            armAudio();
-        else toast("Microphone permission required to arm engine");
-    }
-    private void toast(String text) { Toast.makeText(this, text, Toast.LENGTH_SHORT).show(); }
-    private void refresh() {
-        if (status == null) return;
-        boolean boot = getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).getBoolean("boot_standby",false);
-        standbyButton.setText(boot ? "Disable boot standby" : "Enable boot standby");
-        toneButton.setText(AudioService.tone ? "Stop reference tone" : "Play quiet reference tone");
-        String nativeState = "(not armed)";
-        if (AudioService.running) {
-            try { nativeState = NativeAudio.stats(); } catch (Throwable ex) { nativeState = ex.toString(); }
-        }
-        status.setText("BOOT STANDBY ENABLED: " + boot
-                + "\nSTANDBY RUNNING: " + StandbyService.running
-                + "\nAUDIO ARMED: " + AudioService.running
-                + "\nTEST TONE: " + AudioService.tone
-                + "\n\n" + AudioService.lastStatus
-                + "\n\n" + nativeState
-                + "\n\n" + AudioDevices.describe(this)
-                + "\nStage 2: WebRTC APM; Stage 3: privileged HCI bridge.\n");
-    }
-    @Override protected void onResume() { super.onResume(); handler.post(update); }
-    @Override protected void onPause() { handler.removeCallbacks(update); super.onPause(); }
+ private final Handler handler=new Handler();
+ private Switch standby;
+ private Spinner preset,route,processor,ns;
+ private CheckBox stereo,agc,automatic;
+ private EditText delay;
+ private TextView metrics;
+ private final int[] presets=CapturePresets.ids();
+ private final Runnable update=new Runnable(){public void run(){refresh();handler.postDelayed(this,1000);}};
+ private Spinner spinner(LinearLayout col,String label,String[] options,int selected){
+  TextView t=new TextView(this);t.setText(label);col.addView(t);
+  Spinner s=new Spinner(this);s.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,options));s.setSelection(selected);col.addView(s);return s;
+ }
+ private CheckBox check(LinearLayout col,String label,boolean value){CheckBox c=new CheckBox(this);c.setText(label);c.setChecked(value);col.addView(c);return c;}
+ private void button(LinearLayout col,String text,Runnable action){Button b=new Button(this);b.setText(text);b.setAllCaps(false);col.addView(b);b.setOnClickListener(v->action.run());}
+ @Override public void onCreate(Bundle state){
+  super.onCreate(state);SharedPreferences p=getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE);
+  ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setOrientation(LinearLayout.VERTICAL);col.setPadding(24,24,24,32);scroll.addView(col);setContentView(scroll);
+  TextView title=new TextView(this);title.setText("S9 HFP - Call engine v0.3.0");title.setTextSize(23);col.addView(title);
+  TextView note=new TextView(this);note.setText("Root Bluetooth bridge. Standby keeps mic and speaker closed until SCO call audio arrives. Open Head Unit can stay open. Call routing is experimental; use a test call first.");col.addView(note);
+  standby=new Switch(this);standby.setText("Enable boot standby / Bluetooth call engine");standby.setChecked(p.getBoolean("boot_standby",false));col.addView(standby);
+  standby.setOnCheckedChangeListener((v,on)->{
+   if(on&&EngineService.running&&!EngineService.callMode){standby.setChecked(false);Toast.makeText(this,"Stop Sound Engine Test before enabling standby",Toast.LENGTH_SHORT).show();return;}
+   if(on&&checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){standby.setChecked(false);requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},1);return;}
+   p.edit().putBoolean("boot_standby",on).apply();if(on)startForegroundService(new Intent(this,StandbyService.class));else stopService(new Intent(this,StandbyService.class));
+  });
+  route=spinner(col,"Microphone pathway",new String[]{"Prefer USB, otherwise internal","Internal microphone","USB microphone only (fail if absent)"},p.getInt("engine_mic_route",0));
+  int selection=0;for(int i=0;i<presets.length;i++)if(presets[i]==p.getInt("engine_preset",5))selection=i;
+  preset=spinner(col,"Microphone capture preset",CapturePresets.labels(),selection);
+  stereo=check(col,"Probe stereo input (downmix to mono)",p.getBoolean("engine_stereo",false));
+  processor=spinner(col,"Sound processor",new String[]{"Bypass / raw","WebRTC APM (AEC3 + NS)","SpeexDSP baseline (optional)"},p.getInt("engine_mode",1));
+  ns=spinner(col,"Noise suppression",new String[]{"Off","Moderate","High"},p.getInt("engine_ns",1));
+  agc=check(col,"Automatically raise speech level (AGC2)",p.getBoolean("engine_agc",false));
+  int savedDelay=p.getInt("engine_delay",-1);automatic=check(col,"Automatic stream-delay hint + AEC3 internal alignment",savedDelay<0);
+  delay=new EditText(this);delay.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);delay.setHint("Manual stream-delay hint, 0-500 ms");delay.setText(String.valueOf(savedDelay<0?80:savedDelay));delay.setEnabled(savedDelay>=0);col.addView(delay);
+  automatic.setOnCheckedChangeListener((v,on)->delay.setEnabled(!on));
+  TextView timing=new TextView(this);timing.setText("Auto uses audio timestamps when available; otherwise the 80 ms hint is unmeasured. AEC3 tracks echo alignment independently. Capture pathway changes apply on the next call or test restart.");col.addView(timing);
+  button(col,"Save / apply sound settings",()->{
+   int d=-1;if(!automatic.isChecked())try{d=Integer.parseInt(delay.getText().toString());if(d<0||d>500)throw new NumberFormatException();}catch(NumberFormatException e){Toast.makeText(this,"Enter a delay from 0 to 500 ms",Toast.LENGTH_SHORT).show();return;}
+   Intent i=new Intent(this,EngineService.class).setAction(EngineService.CONFIG).putExtra("engine",processor.getSelectedItemPosition()).putExtra("ns",ns.getSelectedItemPosition()).putExtra("agc",agc.isChecked()).putExtra("delay",d).putExtra("preset",presets[preset.getSelectedItemPosition()]).putExtra("stereo",stereo.isChecked()).putExtra("mic_route",route.getSelectedItemPosition());
+   EngineSettings.save(this,i);if(EngineService.running)startService(i);Toast.makeText(this,"Settings saved; capture route applies on next start",Toast.LENGTH_SHORT).show();
+  });
+  button(col,"Sound Engine Test",()->startActivity(new Intent(this,EngineActivity.class)));
+  button(col,"Reset maximum peak meters",()->{if(EngineService.running)startService(new Intent(this,EngineService.class).setAction(EngineService.RESET_PEAKS));});
+  metrics=new TextView(this);metrics.setTextSize(14);metrics.setTextIsSelectable(true);metrics.setPadding(0,24,0,0);col.addView(metrics);
+ }
+ private void refresh(){EngineService.refreshStats();metrics.setText("LIVE METRICS\n"+StandbyService.status+"\n"+(EngineService.running?EngineService.compactStatus:"Microphone / speaker: inactive")+"\n"+EngineService.info);}
+ @Override public void onRequestPermissionsResult(int r,String[] p,int[] g){super.onRequestPermissionsResult(r,p,g);if(r==1&&g.length>0&&g[0]==PackageManager.PERMISSION_GRANTED)standby.setChecked(true);}
+ @Override protected void onResume(){super.onResume();
+  SharedPreferences saved=getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE);
+  route.setSelection(saved.getInt("engine_mic_route",0));
+  for(int i=0;i<presets.length;i++)if(presets[i]==saved.getInt("engine_preset",5))preset.setSelection(i);
+  processor.setSelection(saved.getInt("engine_mode",1));ns.setSelection(saved.getInt("engine_ns",1));
+  agc.setChecked(saved.getBoolean("engine_agc",false));stereo.setChecked(saved.getBoolean("engine_stereo",false));
+  int hint=saved.getInt("engine_delay",-1);automatic.setChecked(hint<0);delay.setText(String.valueOf(hint<0?80:hint));
+  if(getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE).getBoolean("boot_standby",false)&&!StandbyService.running&&!EngineService.running)
+   startForegroundService(new Intent(this,StandbyService.class));
+  handler.post(update);
+ }
+ @Override protected void onPause(){handler.removeCallbacks(update);super.onPause();}
 }

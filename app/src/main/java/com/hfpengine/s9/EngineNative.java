@@ -16,4 +16,8 @@ final class EngineNative {
     static native String aecMonitor();
     static native void resetPeakMeters();
     static native boolean verifyPeakMeters();
+    static native void bridgeEnable();
+    static native byte[] bridgeExchange(byte[] pcm);
+    static native String compactStats();
+    static native boolean verifyScoResampler();
 }

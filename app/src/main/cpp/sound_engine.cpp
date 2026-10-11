@@ -135,10 +135,36 @@ struct Speex {
     }
     ~Speex(){close();}
 };
+// Streaming 3:1 FIR conversion. State persists across 7.5/10 ms boundaries.
+struct ScoResampler {
+    static constexpr int TAPS=63;
+    std::array<double,TAPS> taps{},history{};
+    int at=0,phase=0;
+    ScoResampler(){
+        double sum=0;
+        for(int i=0;i<TAPS;i++){
+            double x=i-(TAPS-1)/2,fc=7200.0/RATE;
+            taps[i]=(x==0?2*fc:std::sin(2*3.141592653589793*fc*x)/(3.141592653589793*x))
+                *(0.54-0.46*std::cos(2*3.141592653589793*i/(TAPS-1)));
+            sum+=taps[i];
+        }
+        for(auto& t:taps)t/=sum;
+    }
+    int16_t tick(double value,double gain=1){
+        history[at]=value;double result=0;int index=at;
+        for(int k=0;k<TAPS;k++){result+=taps[k]*history[index];if(--index<0)index=TAPS-1;}
+        if(++at==TAPS)at=0;
+        return int16_t(std::clamp(std::lround(result*gain),long(-32768),long(32767)));
+    }
+};
 class Engine{
 public:
     AAudioStream *input=nullptr,*output=nullptr;
     Spsc<RING_SIZE> mic,reference;
+    Spsc<8192> callDown,callUp;
+    ScoResampler upsample,downsample;
+    std::atomic<bool> bridge{false};
+    std::atomic<uint64_t> playbackUnderruns{0},uplinkUnderruns{0},downTrimmed{0},upTrimmed{0};
     std::atomic<bool> running{false},playing{false},tone{false};
     std::atomic<int> mode{1},noise{1},agc{0},delay{-1},configVersion{1},lastApmError{0};
     std::atomic<int> measuredDelay{-1},appliedDelay{80},aecDelay{-1};
@@ -195,9 +221,19 @@ public:
         if(!out)return AAUDIO_CALLBACK_RESULT_CONTINUE;
         bool doSpeech=e.playing.load(std::memory_order_relaxed)&&!e.speech.empty();
         bool doTone=e.tone.load(std::memory_order_relaxed);
+        bool call=e.bridge.load(std::memory_order_acquire);
+        // Trim only on the consumer side; never overwrite unread SPSC data.
+        if(call && e.callDown.depth()>1440){
+            int16_t discard[360];
+            while(e.callDown.depth()>1080 && e.callDown.pop(discard,360))e.downTrimmed.fetch_add(360);
+        }
         for(int i=0;i<frames;i++){
             int32_t value=0;
-            if(doSpeech){
+            if(call){
+                int16_t sample=0;
+                if(!e.callDown.pop(&sample,1))e.playbackUnderruns.fetch_add(1,std::memory_order_relaxed);
+                value=sample;
+            }else if(doSpeech){
                 value=e.speech[e.sampleIndex];
                 if(++e.sampleIndex>=e.speech.size())e.sampleIndex=0;
             }else if(doTone){
@@ -254,6 +290,8 @@ public:
             reason="Expected actual PCM16 48kHz input/output and mono output; inspect audio route";
             stop();return false;
         }
+        int burst=AAudioStream_getFramesPerBurst(output);
+        if(burst>0)AAudioStream_setBufferSizeInFrames(output,2*burst);
         running=true;
         worker=std::thread([this](){process();});
         auto rc=AAudioStream_requestStart(output);
@@ -397,6 +435,14 @@ public:
             rawDb=level(raw,rp,rc);cleanDb=level(clean,cp,cc);
             rawPeak=rp;cleanPeak=cp;cleanClipped.fetch_add(cc);
             updatePeakHolds(rp,cp);
+            if(bridge.load(std::memory_order_acquire)){
+                int16_t packet[BLOCK/3];int count=0;
+                for(int i=0;i<BLOCK;i++){
+                    int16_t filtered=downsample.tick(clean[i]);
+                    if(++downsample.phase==3){downsample.phase=0;packet[count++]=filtered;}
+                }
+                callUp.push(packet,count);
+            }
             // The worker's clean[] block is the future HFP uplink and is currently exported for listening.
             if(recordState.load(std::memory_order_acquire)==1){
                 const uint32_t offset=clipPos.load(std::memory_order_relaxed);
@@ -532,6 +578,22 @@ public:
           <<"\nSpeech: "<<speechNote;
         return o.str();
     }
+    std::string compact() const {
+        std::ostringstream o;
+        o<<"Mode: "<<(bridge?"Bluetooth call":"Sound Engine Test")
+         <<"\nMic RMS / peak: "<<metric(rawDb.load()," dBFS")<<" / "<<rawPeak.load()
+         <<"; max "<<maxRawPeak.load()
+         <<"\nProcessed RMS / peak: "<<metric(cleanDb.load()," dBFS")<<" / "<<cleanPeak.load()
+         <<"; max "<<maxCleanPeak.load()<<"; clipped "<<cleanClipped.load()
+         <<"\nAEC3 delay: "<<milliseconds(aecDelay.load())<<"; ERLE: "<<metric(erle.load()," dB")
+         <<"\nStream hint: "<<appliedDelay.load()<<" ms; "<<timingStatus()
+         <<"\nCall queues down / up: "<<callDown.depth()/48.0<<" / "<<callUp.depth()/16.0<<" ms"
+         <<"\nCall missing samples down / up: "<<playbackUnderruns.load()<<" / "<<uplinkUnderruns.load()
+         <<"; trimmed "<<downTrimmed.load()<<" / "<<upTrimmed.load()
+         <<"\nDSP max "<<processingNsMax.load()/1e6<<" ms; APM / audio errors "<<lastApmError.load()<<" / "<<error.load();
+        if(output)o<<"\nOutput buffer: "<<AAudioStream_getBufferSizeInFrames(output)*1000.0/RATE<<" ms";
+        return o.str();
+    }
 };
 std::mutex engineMutex;
 std::unique_ptr<Engine> engine;
@@ -561,6 +623,41 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_hfpengine_s9_EngineNative_stop(JNIEnv*,jclass){
     std::lock_guard<std::mutex> lock(engineMutex);
     engine.reset();
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_hfpengine_s9_EngineNative_bridgeEnable(JNIEnv*,jclass){
+    std::lock_guard<std::mutex> lock(engineMutex);
+    if(engine)engine->bridge.store(true,std::memory_order_release);
+}
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_hfpengine_s9_EngineNative_bridgeExchange(JNIEnv* env,jclass,jbyteArray bytes){
+    if(!bytes || env->GetArrayLength(bytes)!=240)return nullptr;
+    uint8_t packet[240];env->GetByteArrayRegion(bytes,0,240,reinterpret_cast<jbyte*>(packet));
+    int16_t incoming[360],outgoing[120]{};
+    {
+        std::lock_guard<std::mutex> lock(engineMutex);
+        if(engine && engine->bridge && engine->running){
+            for(int i=0;i<120;i++){
+                int16_t s=int16_t(u16(packet+i*2));
+                incoming[3*i]=engine->upsample.tick(s,3);
+                incoming[3*i+1]=engine->upsample.tick(0,3);
+                incoming[3*i+2]=engine->upsample.tick(0,3);
+            }
+            engine->callDown.push(incoming,360);
+            int16_t discard[120];
+            while(engine->callUp.depth()>480 && engine->callUp.pop(discard,120))engine->upTrimmed.fetch_add(120);
+            if(!engine->callUp.pop(outgoing,120))engine->uplinkUnderruns.fetch_add(120);
+        }
+    }
+    for(int i=0;i<120;i++){uint16_t v=uint16_t(outgoing[i]);packet[2*i]=uint8_t(v);packet[2*i+1]=uint8_t(v>>8);}
+    jbyteArray result=env->NewByteArray(240);
+    if(result)env->SetByteArrayRegion(result,0,240,reinterpret_cast<jbyte*>(packet));
+    return result;
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_hfpengine_s9_EngineNative_compactStats(JNIEnv* env,jclass){
+    std::lock_guard<std::mutex> lock(engineMutex);
+    return str(env,engine?engine->compact():"Microphone / speaker inactive");
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_hfpengine_s9_EngineNative_setPlayback(JNIEnv*,jclass,jint value){
@@ -619,4 +716,23 @@ Java_com_hfpengine_s9_EngineNative_verifyPeakMeters(JNIEnv*,jclass){
     if(test->maxRawPeak!=300 || test->maxCleanPeak!=400)return JNI_FALSE;
     test->resetPeaks=true;test->updatePeakHolds(50,60);
     return test->maxRawPeak==50 && test->maxCleanPeak==60?JNI_TRUE:JNI_FALSE;
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_hfpengine_s9_EngineNative_verifyScoResampler(JNIEnv*,jclass){
+    auto energy=[](double hz){
+        ScoResampler filter;double sum=0;int count=0;
+        for(int i=0;i<4800;i++){
+            int16_t s=filter.tick(10000*std::sin(2*3.141592653589793*hz*i/RATE));
+            if(i>300 && i%3==2){sum+=double(s)*s;count++;}
+        }
+        return sum/count;
+    };
+    double speech=energy(1000),alias=energy(12000);
+    if(speech<45000000 || alias/speech>0.0001)return JNI_FALSE; // >40 dB alias rejection
+    ScoResampler interpolate;double sum=0;int count=0;
+    for(int packet=0;packet<8;packet++)for(int sample=0;sample<120;sample++)for(int phase=0;phase<3;phase++){
+        int16_t s=interpolate.tick(phase==0?1000:0,3);
+        if(packet>0){sum+=s;count++;}
+    }
+    return std::abs(sum/count-1000)<2?JNI_TRUE:JNI_FALSE;
 }

@@ -2,6 +2,22 @@ plugins {
     id 'com.android.application'
 }
 
+tasks.register('verifyBridgeInjector') {
+    doLast {
+        def injector = file('src/main/assets/bridge/frida-inject')
+        if (!injector.isFile()) throw new GradleException('Run PREPARE_FRIDA_WINDOWS.ps1 before building the call bridge')
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        injector.withInputStream { stream ->
+            byte[] chunk = new byte[65536]
+            int size
+            while ((size = stream.read(chunk)) > 0) digest.update(chunk, 0, size)
+        }
+        if (digest.digest().encodeHex().toString() != '795e05b765a68c9272e5abc0bac9536a4ee74799aff2f893fa69dad2a580b8e7')
+            throw new GradleException('Frida injector hash mismatch; rerun PREPARE_FRIDA_WINDOWS.ps1')
+    }
+}
+tasks.named('preBuild').configure { dependsOn('verifyBridgeInjector') }
+
 android {
     namespace 'com.hfpengine.s9'
     compileSdk 34
@@ -12,8 +28,8 @@ android {
         // This is a dedicated Android 12L prototype, not a Play Store release.
         // Background mic constraints still apply even with targetSdk 32.
         targetSdk 32
-        versionCode 6
-        versionName '0.2.4'
+        versionCode 7
+        versionName '0.3.0'
         testInstrumentationRunner 'com.hfpengine.s9.ExportVerification'
         externalNativeBuild {
             cmake { cppFlags '-std=c++20 -Wall -Wextra' }

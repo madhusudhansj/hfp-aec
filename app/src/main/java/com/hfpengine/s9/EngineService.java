@@ -22,12 +22,15 @@ public final class EngineService extends Service {
     static final String COPY_OLD = "com.hfpengine.s9.ENGINE_COPY_OLD";
     static final String RESET_PEAKS = "com.hfpengine.s9.ENGINE_RESET_PEAKS";
     static volatile boolean running = false;
+    static volatile boolean callMode = false;
+    static volatile String compactStatus = "Inactive";
     static volatile String info = "Not started";
     static volatile boolean recording = false;
     static volatile boolean exporting = false;
     static volatile String nativeStatus = "(inactive)";
     static volatile String aecMonitor = "AEC3 monitor inactive — arm the sound engine.";
-    private final ExecutorService controls = Executors.newSingleThreadExecutor();
+    // Shared across service instances: an old asynchronous stop cannot destroy a new call engine.
+    private static final ExecutorService controls = Executors.newSingleThreadExecutor();
     private final java.util.concurrent.atomic.AtomicBoolean statsQueued = new java.util.concurrent.atomic.AtomicBoolean();
     private String pendingPrefix;
 
@@ -77,7 +80,7 @@ public final class EngineService extends Service {
                     info = "Stop and export the current test before reconfiguring devices.";
                     return;
                 }
-                AudioDevices.Choice c = AudioDevices.choose(this);
+                AudioDevices.Choice c = AudioDevices.choose(this,intent.getIntExtra("mic_route",0));
                 String filename = new File(getFilesDir(), "fixture.wav").getAbsolutePath();
                 String wav = new File(filename).isFile() ? filename : "";
                 String speex = getApplicationInfo().nativeLibraryDir + "/libspeexdsp.so";
@@ -87,6 +90,8 @@ public final class EngineService extends Service {
                 running = !info.startsWith("ERROR:");
                 if (!running) { Log.e(TAG, info);stopSelf(); }
                 else {
+                    callMode = intent.getBooleanExtra("bridge",false);
+                    if(callMode) EngineNative.bridgeEnable();
                     configure(intent);
                     EngineNative.setPlayback(0);
                     info += "\nMic preference: " + c.inputName + "\nOutput: " + c.outputName;
@@ -155,6 +160,7 @@ public final class EngineService extends Service {
                 try {
                     nativeStatus = EngineNative.stats();
                     aecMonitor = EngineNative.aecMonitor();
+                    compactStatus = EngineNative.compactStats();
                 }
                 catch (Throwable t) { nativeStatus = t.toString(); }
                 finally { statsQueued.set(false); }
@@ -170,9 +176,8 @@ public final class EngineService extends Service {
         active = null;
         controls.execute(() -> {
             try { EngineNative.stop(); } catch (Throwable t) {Log.e(TAG,"Stop failed",t);}
-            running=false; recording=false; exporting=false;
+            running=false; callMode=false; recording=false; exporting=false;
         });
-        controls.shutdown();
         running=false;recording=false;
         super.onDestroy();
     }
