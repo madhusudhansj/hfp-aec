@@ -10,6 +10,7 @@ public final class HfpReconnect {
   if(service==null){System.out.println("Bluetooth unavailable");return;}
   System.out.println("bond="+device.getBondState()+" HFP state="+adapter.getProfileConnectionState(16));
   if(adapter.getProfileConnectionState(16)==BluetoothProfile.STATE_CONNECTED){System.out.println("HFP connected");return;}
+  if(adapter.getProfileConnectionState(16)==BluetoothProfile.STATE_CONNECTING){System.out.println("HFP connecting");return;}
   for(Method method:service.getClass().getMethods())if(method.getName().equals("connectAllEnabledProfiles")){
    System.out.println("Available: "+method);
    if(!args[1].equals("connect"))return;

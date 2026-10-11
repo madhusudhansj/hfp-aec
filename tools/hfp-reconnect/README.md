@@ -1,5 +1,11 @@
 # Root Bluetooth boot reconnect
 
+The separate module described below has been superseded on the test phone by
+the integrated `tools/pe12-hfpclient` v0.5 module. The Java helper is shared.
+The integrated path reconnects immediately after the Bluetooth restart and
+does not wait for audio-app standby. Keep the separate module disabled when
+using the integrated version.
+
 The tested Android 12 S9 ROM exposes
 `IBluetooth.connectAllEnabledProfiles(BluetoothDevice, AttributionSource)`.
 A root `app_process` helper can call it without binding an app service or
