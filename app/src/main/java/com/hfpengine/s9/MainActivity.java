@@ -25,7 +25,7 @@ public final class MainActivity extends Activity {
  @Override public void onCreate(Bundle state){
   super.onCreate(state);SharedPreferences p=getSharedPreferences(AppSupport.PREFS,MODE_PRIVATE);
   ScrollView scroll=new ScrollView(this);LinearLayout col=new LinearLayout(this);col.setOrientation(LinearLayout.VERTICAL);col.setPadding(24,24,24,32);scroll.addView(col);setContentView(scroll);
-  TextView title=new TextView(this);title.setText("S9 HFP - Call engine v0.3.1");title.setTextSize(23);col.addView(title);
+  TextView title=new TextView(this);title.setText("S9 HFP - Call engine v0.3.2");title.setTextSize(23);col.addView(title);
   TextView note=new TextView(this);note.setText("Root Bluetooth bridge. Standby keeps mic and speaker closed until SCO call audio arrives. Open Head Unit can stay open. Call routing is experimental; use a test call first.");col.addView(note);
   standby=new Switch(this);standby.setText("Enable boot standby / Bluetooth call engine");standby.setChecked(p.getBoolean("boot_standby",false));col.addView(standby);
   standby.setOnCheckedChangeListener((v,on)->{
