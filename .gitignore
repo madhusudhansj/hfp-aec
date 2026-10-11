@@ -6,3 +6,9 @@ app/build/
 *.iml
 .cxx/
 app/.cxx/
+
+# Pinned WebRTC APM downloads and optional local native DSP binary
+app/src/main/apm/
+app/src/main/jniLibs/
+app/src/main/assets/third_party_licenses/
+app/src/main/assets/bridge/frida-inject

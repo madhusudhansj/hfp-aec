@@ -1,0 +1,6 @@
+id=s9_wifi_p2p_interface_fix
+name=S9 Wi-Fi Direct interface fix
+version=1.0
+versionCode=1
+author=HFP Engine project
+description=Recognizes p2p-wlan interfaces in Android 12 tethering. No Wi-Fi credentials or audio settings changed.

@@ -1,3 +1,15 @@
+# S9 HFP Engine — v0.2 WebRTC AEC3 sound-engine prototype
+
+**Ready to compile:** real-time native AAudio + WebRTC APM test engine (no Bluetooth HCI bridge yet). **On-device audio quality and delay remain unverified.**
+
+See **[v0.2 build and microphone/echo test guide](docs/V02_BUILD_AND_TEST.md)** for the precise Windows library download command, Android Studio build instructions, controls, WAV export and limitations.
+
+The original v0.1 diagnostic source and UI remain available; the new test opens via **Open v0.2 WebRTC AEC3 sound-engine test**.
+
+The earlier v0.1 README is retained below for reference.
+
+---
+
 # S9 HFP Engine — v0.1 Android Studio source
 
 **Hardware target:** Samsung Galaxy S9+ SM-G965F (arm64), rooted PixelOS / Android 12L.

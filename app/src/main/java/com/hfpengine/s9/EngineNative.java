@@ -1,0 +1,23 @@
+package com.hfpengine.s9;
+
+final class EngineNative {
+    static { System.loadLibrary("hfp_audio"); }
+    private EngineNative() {}
+    static native String start(String wavPath, String speexLibraryPath,
+                               int micDeviceId, int outputDeviceId, int preset, int channels);
+    static native void stop();
+    // 0 = silent, 1 = WAV speech loop, 2 = quiet 660-Hz diagnostic tone.
+    static native void setPlayback(int mode);
+    // 0 = bypass, 1 = WebRTC APM, 2 = optional Speex; delay -1 = timestamp estimate.
+    static native void config(int engineMode, int noiseSuppression, boolean agc, int delayMs);
+    static native boolean record();
+    static native String export(String prefix);
+    static native String stats();
+    static native String aecMonitor();
+    static native void resetPeakMeters();
+    static native boolean verifyPeakMeters();
+    static native void bridgeEnable();
+    static native byte[] bridgeExchange(byte[] pcm);
+    static native String compactStats();
+    static native boolean verifyScoResampler();
+}

@@ -35,15 +35,21 @@ final class AudioDevices {
         return name + " (id=" + d.getId() + ", type=" + d.getType() + ")";
     }
     static Choice choose(Context ctx) {
+        return choose(ctx, 0);
+    }
+    static Choice choose(Context ctx, int pathway) {
         AudioManager manager = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
         AudioDeviceInfo mic = null, speaker = null;
         for (AudioDeviceInfo d : manager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+            if (pathway == 1 && d.getType() != AudioDeviceInfo.TYPE_BUILTIN_MIC) continue;
+            if (pathway == 2 && !isUsb(d)) continue;
             if (mic == null || inputRank(d) > inputRank(mic)) mic=d;
         }
         for (AudioDeviceInfo d : manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
             if (speaker == null || outputRank(d) > outputRank(speaker)) speaker=d;
         }
         // AAUDIO_UNSPECIFIED = 0. This is a last fallback to platform routing.
+        if (pathway != 0 && mic == null) throw new IllegalStateException("Selected microphone pathway is unavailable");
         return new Choice(mic == null ? 0 : mic.getId(),
                 speaker == null ? 0 : speaker.getId(),
                 mic == null ? "Platform default" : label(mic),

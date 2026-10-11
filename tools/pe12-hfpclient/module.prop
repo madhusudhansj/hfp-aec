@@ -1,0 +1,6 @@
+id=pe12_hfpclient
+name=Pixel Experience 12 HFP Client Boot Overlay
+version=v0.5
+versionCode=5
+author=ChatGPT + device testing
+description=Enables HFP Client, performs one verified Bluetooth restart, then immediately reconnects the configured paired phone with bounded retries.
