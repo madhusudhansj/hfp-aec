@@ -61,6 +61,7 @@ public final class AudioService extends Service {
         int preset = getSharedPreferences(AppSupport.PREFS, MODE_PRIVATE).getInt("preset", 5);
         try {
             NativeAudio.stop();
+            NativeAudio.setSpeexPath(getApplicationInfo().nativeLibraryDir + "/libspeexdsp.so");
             lastStatus = NativeAudio.start(c.input, c.output, preset)
                     + "\nPreferred input: " + c.inputName
                     + "\nPreferred output: " + c.outputName;
