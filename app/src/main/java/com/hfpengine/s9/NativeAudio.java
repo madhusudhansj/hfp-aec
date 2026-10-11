@@ -11,4 +11,5 @@ final class NativeAudio {
     static native String finishAecRecord(String prefix);
     static native void setAecDelay(int delayMs);
     static native String aecStatus();
+    static native void setSpeexPath(String path);
 }
