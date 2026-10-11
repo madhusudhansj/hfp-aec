@@ -141,6 +141,7 @@ public:
     std::atomic<int> mode{1},noise{1},agc{0},delay{80},configVersion{1},lastApmError{0};
     std::atomic<int> error{0}, actualInChannels{0}, actualInRate{0},actualOutRate{0};
     std::atomic<uint64_t> captured{0},rendered{0},processed{0},processingNs{0},processingNsMax{0},stereoDifference{0},stereoEnergy{0};
+    std::atomic<bool> speexAvailable{false};
     std::atomic<uint32_t> clipPos{0};
     std::atomic<int> recordState{0}; // 0 idle, 1 recording, 2 stop request, 3 complete
     std::vector<int16_t> recRaw,recApm,recRef;
@@ -260,7 +261,7 @@ public:
         const webrtc::StreamConfig format(RATE,1);
         Speex speex;
         int lastVersion=-1;
-        int16_t raw[BLOCK]{},far[BLOCK]{},clean[BLOCK]{};
+        int16_t raw[BLOCK]{},far[BLOCK]{},farForApm[BLOCK]{},clean[BLOCK]{};
         while(running.load(std::memory_order_acquire)){
             if(recordState.load(std::memory_order_acquire)==2)recordState.store(3,std::memory_order_release);
             if(!mic.pop(raw,BLOCK)){
@@ -282,12 +283,17 @@ public:
                 cfg.gain_controller2.enabled=agc.load()!=0;
                 apm=webrtc::BuiltinAudioProcessingBuilder(cfg).Build(webrtc::CreateEnvironment());
                 if(!apm)LOGE("APM builder failed");
-                if(mode.load()==2 && !speex.open(speexPath))LOGE("Speex not available: %s",speexPath.c_str());
+                if(mode.load()==2) {
+                    bool loaded=speex.open(speexPath);
+                    speexAvailable=loaded;
+                    if(!loaded)LOGE("Speex not available: %s",speexPath.c_str());
+                } else speexAvailable=false;
             }
             std::memcpy(clean,raw,sizeof(raw));
             int active=mode.load();
             if(active==1 && apm){
-                int e1=apm->ProcessReverseStream(far,format,format,far);
+                std::memcpy(farForApm,far,sizeof(far));
+                int e1=apm->ProcessReverseStream(farForApm,format,format,farForApm);
                 apm->set_stream_delay_ms(delay.load());
                 int e2=apm->ProcessStream(raw,format,format,clean);
                 if(e1||e2)lastApmError.store(e1?e1:e2);
@@ -332,7 +338,7 @@ public:
                 wav(prefix+"_farend_reference.wav",recRef,n);
         FILE* meta=fopen((prefix+"_metadata.json").c_str(),"wb");
         if(meta){
-            const char* engine=mode==1?"webrtc_apm":(mode==2?"speex":"bypass");
+            const char* engine=mode==1?"webrtc_apm":(mode==2?(speexAvailable?"speex":"speex_unavailable_bypass"):"bypass");
             fprintf(meta,"{\n \"sample_rate\":48000,\"channels\":1,\"frames\":%zu,"
                "\n \"engine\":\"%s\",\"delay_ms\":%d,\"noise_mode\":%d,\"agc\":%d,"
                "\n \"input_device_id\":%d,\"output_device_id\":%d,"
@@ -362,6 +368,7 @@ public:
           <<"\nDSP average "<<ms<<" ms / 10ms; max "<<processingNsMax.load()/1e6<<" ms"
           <<"\nAPM error "<<lastApmError<<"; AAudio error "<<error
           <<"\nStereo difference ratio "<<(stereoEnergy?double(stereoDifference.load())/stereoEnergy.load():0)
+          <<"\nSpeex loaded "<<speexAvailable
           <<"\nRecording state "<<recordState<<", samples "<<clipPos
           <<"\nSpeech: "<<speechNote;
         return o.str();
