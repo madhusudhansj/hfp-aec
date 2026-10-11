@@ -22,5 +22,8 @@ There is no ongoing retry after the bounded boot window.
 
 Disable `s9_hfp_reconnect` in Magisk and reboot to disable automatic reconnect.
 The master switch must be enabled for boot reconnect to run; disabling standby
-does not disconnect an existing Bluetooth connection. A real reboot test is
-still required for the module, separate from the successful manual API test.
+does not disconnect an existing Bluetooth connection.
+
+A real reboot test on the S9+ passed: standby started with the UI closed,
+the bounded retry log ended with `HFP connected`, and Bluetooth dumpsys confirmed
+the OnePlus HeadsetClientStateMachine was `Connected` with audio state 0.
