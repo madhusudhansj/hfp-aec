@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(hfp_audio LANGUAGES CXX)
+add_library(hfp_audio SHARED native_audio.cpp)
+set_target_properties(hfp_audio PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+find_library(log-lib log)
+find_library(aaudio-lib aaudio)
+target_link_libraries(hfp_audio PRIVATE ${aaudio-lib} ${log-lib})

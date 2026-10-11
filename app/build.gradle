@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.hfpengine.s9'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.hfpengine.s9'
+        minSdk 28
+        // This is a dedicated Android 12L prototype, not a Play Store release.
+        // Background mic constraints still apply even with targetSdk 32.
+        targetSdk 32
+        versionCode 1
+        versionName '0.1.0'
+        externalNativeBuild {
+            cmake { cppFlags '-std=c++17 -Wall -Wextra' }
+        }
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    externalNativeBuild {
+        cmake { path 'src/main/cpp/CMakeLists.txt' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    buildTypes {
+        debug { debuggable true }
+        release { minifyEnabled false }
+    }
+}
