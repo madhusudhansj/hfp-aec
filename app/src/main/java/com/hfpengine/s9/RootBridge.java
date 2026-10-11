@@ -38,7 +38,13 @@ final class RootBridge implements AutoCloseable {
  private static String quote(String s){return "'"+s.replace("'","'\\''")+"'";}
  private void inject(){
   try{
-   File binary=copyAsset("frida-inject"),script=copyAsset("s9-apk-bridge.js");
+   File binary=copyAsset("frida-inject"),script=copyAsset("s9-apk-bridge.js"),boot=copyAsset("boot-standby.sh");
+   String bootText=new String(java.nio.file.Files.readAllBytes(boot.toPath()),StandardCharsets.UTF_8).replace("@@PACKAGE@@",context.getPackageName());
+   java.nio.file.Files.write(boot.toPath(),bootText.getBytes(StandardCharsets.UTF_8));
+   String bootPath="/data/adb/service.d/s9-hfp-"+context.getPackageName()+".sh";
+   Process installBoot=new ProcessBuilder("su","-c","umask 077; mkdir -p /data/adb/service.d && cp "+quote(boot.getAbsolutePath())+" "+quote(bootPath)+" && chmod 700 "+quote(bootPath)).redirectErrorStream(true).start();
+   if(!installBoot.waitFor(15,TimeUnit.SECONDS)){installBoot.destroy();throw new IOException("Root boot setup timed out");}
+   if(installBoot.exitValue()!=0)android.util.Log.w("HfpEngine","Root boot fallback installation failed");
    String text=new String(java.nio.file.Files.readAllBytes(script.toPath()),StandardCharsets.UTF_8).replace("@@TOKEN@@",token);
    java.nio.file.Files.write(script.toPath(),text.getBytes(StandardCharsets.UTF_8));
    // A private directory per standby instance prevents a late stop from killing a new helper.
@@ -116,5 +122,6 @@ final class RootBridge implements AutoCloseable {
   File dir=new File(context.getFilesDir(),"bridge");
   new File(dir,token.substring(0,8)+"-frida-inject").delete();
   new File(dir,token.substring(0,8)+"-s9-apk-bridge.js").delete();
+  new File(dir,token.substring(0,8)+"-boot-standby.sh").delete();
  }
 }
