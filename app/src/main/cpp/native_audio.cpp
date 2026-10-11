@@ -1,4 +1,5 @@
 #include <jni.h>
+#include "aec_engine.h"
 #include <aaudio/AAudio.h>
 #include <android/log.h>
 #include <array>
@@ -40,6 +41,7 @@ static aaudio_data_callback_result_t onInput(AAudioStream *, void *, void *buffe
     gSumSquares.store(squares, std::memory_order_relaxed);
     gRmsCount.store(frames, std::memory_order_release);
     gPeak.store(peak, std::memory_order_relaxed);
+    AecDiag::microphone(samples,frames);
     gCapturedFrames.fetch_add(frames, std::memory_order_relaxed);
     // No recording is retained or sent anywhere in this v0.1 diagnostic.
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -61,6 +63,7 @@ static aaudio_data_callback_result_t onOutput(AAudioStream *, void *, void *buff
             if (gPhase >= 1.0) gPhase -= 1.0;
         }
     }
+    AecDiag::render(samples,frames,gOutChannels);
     gRenderedFrames.fetch_add(frames, std::memory_order_relaxed);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
@@ -71,6 +74,7 @@ static void onError(AAudioStream *, void *, aaudio_result_t error) {
 }
 
 static void stopLocked() {
+    AecDiag::stop();
     gTone.store(false);
     if (gInput) {
         AAudioStream_requestStop(gInput);
@@ -155,6 +159,7 @@ Java_com_hfpengine_s9_NativeAudio_start(JNIEnv *env, jclass, jint inputId, jint 
         stopLocked();
         return toJava(env, msg);
     }
+    AecDiag::start("/data/local/tmp/libspeexdsp.so", AAudioStream_getSampleRate(gInput), AAudioStream_getSampleRate(gOutput));
     // Start the output, then mic. No feedback loop: output is silence until test tone is enabled.
     r = AAudioStream_requestStart(gOutput);
     if (r == AAUDIO_OK) r = AAudioStream_requestStart(gInput);
@@ -207,4 +212,22 @@ Java_com_hfpengine_s9_NativeAudio_stats(JNIEnv *env, jclass) {
       << "\nOUTPUT: " << describeStream(gOutput)
       << "\nINPUT: " << describeStream(gInput);
     return toJava(env, o.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_hfpengine_s9_NativeAudio_beginAecRecord(JNIEnv* env,jclass,jint seconds) {
+    return env->NewStringUTF(AecDiag::begin(seconds).c_str());
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_hfpengine_s9_NativeAudio_finishAecRecord(JNIEnv* env,jclass,jstring prefix) {
+    const char* p=env->GetStringUTFChars(prefix,nullptr);
+    auto result=AecDiag::finish(p);
+    env->ReleaseStringUTFChars(prefix,p);
+    return env->NewStringUTF(result.c_str());
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_hfpengine_s9_NativeAudio_setAecDelay(JNIEnv*,jclass,jint ms) { AecDiag::setDelayMs(ms); }
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_hfpengine_s9_NativeAudio_aecStatus(JNIEnv* env,jclass) {
+    return env->NewStringUTF(AecDiag::status().c_str());
 }
